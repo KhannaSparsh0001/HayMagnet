@@ -1,2 +1,6 @@
 tigergraph-mcp==1.0.3
-dotenv
+python-dotenv
+pandas
+mcp
+google-genai
+PyPDF2

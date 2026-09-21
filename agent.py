@@ -34,17 +34,34 @@ def get_fraud_rules():
             text += page.extract_text() + "\n"
     return text
 
+def clean_schema(schema):
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {}
+    for k, v in schema.items():
+        # Gemini's strict OpenAPI validator rejects these standard JSON schema keys
+        if k in ["examples", "default", "title", "$ref", "$defs"]:
+            continue
+        if isinstance(v, dict):
+            cleaned[k] = clean_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_schema(item) for item in v]
+        else:
+            cleaned[k] = v
+    return cleaned
+
 def convert_mcp_tool_to_gemini(mcp_tool):
     """Translates the TigerGraph MCP tool JSON schema into a Gemini Function Declaration."""
+    safe_schema = clean_schema(mcp_tool.input_schema)
     return types.FunctionDeclaration(
         name=mcp_tool.name,
         description=mcp_tool.description,
-        parameters=mcp_tool.inputSchema
+        parameters=safe_schema
     )
 
 async def investigate_case(session, case_trigger, tools, rules):
     print(f"\n==============================================")
-    print(f"🕵️ INVESTIGATING CASE: {case_trigger}")
+    print(f"INVESTIGATING CASE: {case_trigger}")
     print(f"==============================================\n")
     
     system_instruction = f"""
@@ -83,7 +100,7 @@ async def investigate_case(session, case_trigger, tools, rules):
     # The Tool Calling Loop (Bridging Gemini to the MCP Server)
     while response.function_calls:
         for fc in response.function_calls:
-            print(f"🤖 Gemini is running TigerGraph Tool: {fc.name}()")
+            print(f"> Gemini is running TigerGraph Tool: {fc.name}()")
             
             # Execute the tool on the TigerGraph MCP server
             # Convert args to a dict (Gemini provides a structured object or dict)
@@ -102,14 +119,16 @@ async def investigate_case(session, case_trigger, tools, rules):
             )
             response = chat.send_message(tool_response)
             
-    print(f"\n✅ FINAL VERDICT:\n{response.text}\n")
+    print(f"\nFINAL VERDICT:\n{response.text}\n")
 
 async def main():
     print("Starting TigerGraph MCP server...")
     
     # Launch the TigerGraph MCP server in the background
+    mcp_executable = os.path.join(sys.prefix, "Scripts", "tigergraph-mcp.exe") if sys.platform == "win32" else "tigergraph-mcp"
+    
     server_params = StdioServerParameters(
-        command="tigergraph-mcp",
+        command=mcp_executable,
         args=[],
         env=os.environ.copy() # Passes TG_HOST and TG_SECRET from .env automatically
     )
@@ -122,8 +141,17 @@ async def main():
             await session.initialize()
             
             tools_response = await session.list_tools()
-            tools = tools_response.tools
-            print(f"Connected! Loaded {len(tools)} graph tools (e.g., {[t.name for t in tools]}).\n")
+            
+            # Filter the 69 tools down to just what the Agent needs for investigation
+            allowed_tools = [
+                "tigergraph__gsql", 
+                "tigergraph__get_node", 
+                "tigergraph__get_node_edges", 
+                "tigergraph__get_graph_schema",
+                "tigergraph__run_query"
+            ]
+            tools = [t for t in tools_response.tools if t.name in allowed_tools]
+            print(f"Connected! Loaded {len(tools)} graph tools: {[t.name for t in tools]}\n")
             
             # Load the cases
             df = pd.read_csv("HHGOA_IEEE/case_pack.csv")

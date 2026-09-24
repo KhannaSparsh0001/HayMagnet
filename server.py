@@ -17,7 +17,8 @@ from agent import (
     async_agent3_critic, 
     agent1_db_expert, 
     async_format_final_verdict,
-    async_agent_failure_analyst
+    async_agent_failure_analyst,
+    test_model_connection
 )
 
 # Global state wrapper
@@ -94,8 +95,22 @@ async def list_cases():
     cases = clean_df.to_dict(orient="records")
     return {"cases": cases}
 
+@app.get("/api/test-model")
+async def test_model_endpoint(provider: str = "auto", model_name: str = "", api_key: str = ""):
+    if not model_name:
+        raise HTTPException(status_code=400, detail="model_name parameter is required.")
+    res = await test_model_connection(provider=provider, model_name=model_name, api_key=api_key)
+    return res
+
 @app.get("/api/investigate/{case_id}")
-async def investigate_case_stream(case_id: str):
+async def investigate_case_stream(
+    case_id: str,
+    gemini_key: str = None,
+    groq_key: str = None,
+    agent1_model: str = None,
+    agent2_model: str = None,
+    agent3_model: str = None
+):
     if app_state.df is None:
         raise HTTPException(status_code=500, detail="Dataset not loaded")
         
@@ -105,6 +120,9 @@ async def investigate_case_stream(case_id: str):
         
     row = case_rows.iloc[0].to_dict()
     case_trigger = row.get('trigger_text', '')
+
+    api_keys = {"gemini": gemini_key, "groq": groq_key}
+    models = {"agent1": agent1_model, "agent2": agent2_model, "agent3": agent3_model}
 
     async def event_generator():
         try:
@@ -126,7 +144,14 @@ async def investigate_case_stream(case_id: str):
                 
                 # Collect Agent 2 planner streamed response
                 planner_output = ""
-                async for chunk in async_agent2_planner_stream(case_trigger, app_state.rules, db_evidence, feedback=critic_feedback):
+                async for chunk in async_agent2_planner_stream(
+                    case_trigger, 
+                    app_state.rules, 
+                    db_evidence, 
+                    feedback=critic_feedback,
+                    api_keys=api_keys,
+                    models=models
+                ):
                     planner_output += chunk
                     yield sse_format("planner_chunk", {"chunk": chunk, "turn": turn + 1})
                 
@@ -137,7 +162,13 @@ async def investigate_case_stream(case_id: str):
 
                     # Agent 3 Critic Review
                     yield sse_format("critic_start", {"turn": turn + 1})
-                    review = await async_agent3_critic(planner_output, db_evidence, app_state.rules)
+                    review = await async_agent3_critic(
+                        planner_output, 
+                        db_evidence, 
+                        app_state.rules,
+                        api_keys=api_keys,
+                        models=models
+                    )
                     approved = "APPROVED" in review
 
                     yield sse_format("critic_review", {
@@ -148,7 +179,13 @@ async def investigate_case_stream(case_id: str):
 
                     if approved:
                         verdict_approved = True
-                        json_res = await async_format_final_verdict(planner_output, case_id, mcp_client=app_state.mcp_client)
+                        json_res = await async_format_final_verdict(
+                            planner_output, 
+                            case_id, 
+                            mcp_client=app_state.mcp_client,
+                            api_keys=api_keys,
+                            models=models
+                        )
                         yield sse_format("final_verdict", {
                             "case_id": case_id,
                             "raw_verdict": planner_output,
@@ -175,7 +212,9 @@ async def investigate_case_stream(case_id: str):
                     app_state.mcp_client, 
                     planner_output, 
                     app_state.tools, 
-                    ui_callback=ui_callback
+                    ui_callback=ui_callback,
+                    api_keys=api_keys,
+                    models=models
                 )
 
                 for t in tool_calls_executed:
@@ -190,7 +229,14 @@ async def investigate_case_stream(case_id: str):
 
             # If loop completed without an approved verdict -> Failure Analysis Agent
             failure_analysis = await async_agent_failure_analyst(case_trigger, db_evidence, critic_feedback)
-            json_res = await async_format_final_verdict(failure_analysis, case_id, is_inconclusive=True, mcp_client=app_state.mcp_client)
+            json_res = await async_format_final_verdict(
+                failure_analysis, 
+                case_id, 
+                is_inconclusive=True, 
+                mcp_client=app_state.mcp_client,
+                api_keys=api_keys,
+                models=models
+            )
 
             yield sse_format("final_verdict", {
                 "case_id": case_id,

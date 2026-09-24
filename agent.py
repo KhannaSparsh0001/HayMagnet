@@ -33,14 +33,20 @@ async_groq_client = AsyncGroq(api_key=groq_api_key) if groq_api_key and groq_api
 
 GROQ_CANDIDATE_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
 
-async def async_groq_completion_with_fallback(messages, tools=None, temperature=0.0, response_format=None, candidate_models=None):
+async def async_groq_completion_with_fallback(messages, tools=None, temperature=0.0, response_format=None, candidate_models=None, custom_api_key=None, primary_model=None):
     """Executes a Groq chat completion with automatic model fallback across candidate models."""
-    if not async_groq_client:
+    client = AsyncGroq(api_key=custom_api_key) if custom_api_key else async_groq_client
+    if not client:
         raise RuntimeError("GROQ_API_KEY is not configured.")
-    if candidate_models is None:
-        candidate_models = GROQ_CANDIDATE_MODELS
+    
+    models = list(candidate_models) if candidate_models else list(GROQ_CANDIDATE_MODELS)
+    if primary_model:
+        if primary_model in models:
+            models.remove(primary_model)
+        models.insert(0, primary_model)
+
     last_err = None
-    for model in candidate_models:
+    for model in models:
         try:
             kwargs = {
                 "model": model,
@@ -51,23 +57,29 @@ async def async_groq_completion_with_fallback(messages, tools=None, temperature=
                 kwargs["tools"] = tools
             if response_format:
                 kwargs["response_format"] = response_format
-            return await async_groq_client.chat.completions.create(**kwargs)
+            return await client.chat.completions.create(**kwargs)
         except Exception as e:
             last_err = e
             print(f"  [Groq Fallback Chain] Model {model} failed: {e}. Trying next candidate...")
             continue
     raise last_err
 
-async def async_groq_stream_with_fallback(messages, temperature=0.0, candidate_models=None):
+async def async_groq_stream_with_fallback(messages, temperature=0.0, candidate_models=None, custom_api_key=None, primary_model=None):
     """Streams a Groq chat completion with automatic model fallback across candidate models."""
-    if not async_groq_client:
+    client = AsyncGroq(api_key=custom_api_key) if custom_api_key else async_groq_client
+    if not client:
         yield "Final Verdict: Error - GROQ_API_KEY is not configured."
         return
-    if candidate_models is None:
-        candidate_models = GROQ_CANDIDATE_MODELS
-    for model in candidate_models:
+        
+    models = list(candidate_models) if candidate_models else list(GROQ_CANDIDATE_MODELS)
+    if primary_model:
+        if primary_model in models:
+            models.remove(primary_model)
+        models.insert(0, primary_model)
+
+    for model in models:
         try:
-            stream = await async_groq_client.chat.completions.create(
+            stream = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -85,6 +97,52 @@ async def async_groq_stream_with_fallback(messages, temperature=0.0, candidate_m
 # Setup Hugging Face (Fallback DB Agent)
 hf_token = os.getenv("HF_TOKEN")
 hf_client = InferenceClient(api_key=hf_token) if hf_token and hf_token != "your_huggingface_token_here" else None
+
+async def test_model_connection(provider: str, model_name: str, api_key: str = None) -> dict:
+    """Tests a model connection by sending a 1-token test prompt."""
+    provider_clean = (provider or "").lower()
+    
+    # Auto-detect provider if not explicitly set
+    if not provider_clean or provider_clean == "auto":
+        if "gemini" in model_name.lower():
+            provider_clean = "gemini"
+        else:
+            provider_clean = "groq"
+            
+    if provider_clean == "gemini":
+        key = api_key or os.getenv("GEMINI_API_KEY")
+        if not key or key == "your_gemini_api_key_here":
+            return {"ok": False, "error": "GEMINI_API_KEY is missing or not provided."}
+        try:
+            client = genai.Client(api_key=key)
+            def _test_gemini():
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents="ping",
+                    config=types.GenerateContentConfig(max_output_tokens=2)
+                )
+                return res.text
+            await asyncio.to_thread(_test_gemini)
+            return {"ok": True, "message": f"Successfully connected to Gemini model '{model_name}'!"}
+        except Exception as e:
+            return {"ok": False, "error": f"Gemini Error: {str(e)}"}
+            
+    elif provider_clean == "groq":
+        key = api_key or os.getenv("GROQ_API_KEY")
+        if not key or key == "your_groq_api_key_here":
+            return {"ok": False, "error": "GROQ_API_KEY is missing or not provided."}
+        try:
+            client = AsyncGroq(api_key=key)
+            await client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=2
+            )
+            return {"ok": True, "message": f"Successfully connected to Groq model '{model_name}'!"}
+        except Exception as e:
+            return {"ok": False, "error": f"Groq Error: {str(e)}"}
+    else:
+        return {"ok": False, "error": f"Unsupported model provider '{provider}'"}
 
 # Global cached schema strategy
 CACHED_GRAPH_SCHEMA_STRATEGY = ""
@@ -315,9 +373,12 @@ def agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
         if chunk.choices[0].delta.content is not None:
             yield chunk.choices[0].delta.content
 
-async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
-    """Groq acts as the Lead Investigator, yielding chunks asynchronously with multi-model fallback."""
-    if not async_groq_client:
+async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback="", api_keys=None, models=None):
+    """Groq/Gemini acts as the Lead Investigator, yielding chunks asynchronously with multi-model fallback."""
+    groq_key = (api_keys or {}).get("groq") or os.getenv("GROQ_API_KEY")
+    agent2_model = (models or {}).get("agent2")
+    
+    if not groq_key and not async_groq_client:
         yield "Final Verdict: Error - GROQ_API_KEY is not configured."
         return
         
@@ -348,12 +409,15 @@ async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback
     Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
     """
     messages = [{"role": "system", "content": prompt}]
-    async for chunk in async_groq_stream_with_fallback(messages):
+    async for chunk in async_groq_stream_with_fallback(messages, custom_api_key=groq_key, primary_model=agent2_model):
         yield chunk
 
-async def async_agent3_critic(verdict, db_evidence, rules):
-    """Async Groq Overseer with multi-model fallback."""
-    if not async_groq_client:
+async def async_agent3_critic(verdict, db_evidence, rules, api_keys=None, models=None):
+    """Async Overseer with multi-model fallback."""
+    groq_key = (api_keys or {}).get("groq") or os.getenv("GROQ_API_KEY")
+    agent3_model = (models or {}).get("agent3")
+    
+    if not groq_key and not async_groq_client:
         return "APPROVED"
         
     capped_evidence = db_evidence[-3000:] if len(db_evidence) > 3000 else db_evidence
@@ -379,18 +443,25 @@ async def async_agent3_critic(verdict, db_evidence, rules):
     REJECTED: [Detailed feedback on what the investigator needs to do instead]
     """
     try:
-        completion = await async_groq_completion_with_fallback([{"role": "system", "content": prompt}])
+        completion = await async_groq_completion_with_fallback(
+            [{"role": "system", "content": prompt}],
+            custom_api_key=groq_key,
+            primary_model=agent3_model
+        )
         return completion.choices[0].message.content
     except Exception as e:
-        print(f"  [Critic] All Groq models failed: {e}. Defaulting to APPROVED.")
+        print(f"  [Critic] Model execution failed: {e}. Defaulting to APPROVED.")
         return "APPROVED"
 
-async def async_format_final_verdict(verdict_text, case_id, is_inconclusive=False, mcp_client=None, tool_calls=0, latency_s=0.0):
-    """Uses AsyncGroq and policy_engine to create a 100% compliant HHGOA IEEE Benchmark JSON case file."""
+async def async_format_final_verdict(verdict_text, case_id, is_inconclusive=False, mcp_client=None, tool_calls=0, latency_s=0.0, api_keys=None, models=None):
+    """Uses AsyncGroq/policy_engine to create a 100% compliant HHGOA IEEE Benchmark JSON case file."""
     os.makedirs("cases", exist_ok=True)
     file_path = f"cases/{case_id}.json"
+    
+    groq_key = (api_keys or {}).get("groq") or os.getenv("GROQ_API_KEY")
+    formatter_model = (models or {}).get("agent3") or (models or {}).get("agent2")
 
-    if is_inconclusive or not async_groq_client:
+    if is_inconclusive or (not groq_key and not async_groq_client):
         case_det = policy_engine.CaseDetails(
             status="escalated" if is_inconclusive else "closed_legitimate",
             verdict="uncertain" if is_inconclusive else "legitimate",
@@ -772,8 +843,20 @@ async def async_agent_failure_analyst(case_trigger, db_evidence, last_critic_rev
     except Exception as e:
         return f"Investigation incomplete: Encountered system errors during database retrieval and analysis trace ({e})."
 
-async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
-    """Gemini 3.6 Flash acts as the DB Expert with TigerGraph MCP Tools."""
+async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None, api_keys=None, models=None):
+    """DB Expert Agent supporting Gemini, Groq, or custom model choices with TigerGraph MCP Tools."""
+    gemini_key = (api_keys or {}).get("gemini") or os.getenv("GEMINI_API_KEY")
+    agent1_model = (models or {}).get("agent1") or "gemini-flash-latest"
+    
+    # If the user selected a Groq model for Agent 1, route directly to Groq Tool execution fallback
+    if "/" in agent1_model or "gpt-oss" in agent1_model or "qwen" in agent1_model or "llama" in agent1_model:
+        system_instruction = f"""
+        You are an expert Graph Database Query Agent for TigerGraph.
+        You have direct access to TigerGraph MCP tools for the graph `FraudGraph`.
+        {CACHED_GRAPH_SCHEMA_STRATEGY if CACHED_GRAPH_SCHEMA_STRATEGY else ''}
+        """
+        return await agent1_groq_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
+
     system_instruction = f"""
     You are an expert Graph Database Query Agent for TigerGraph.
     You have direct access to TigerGraph MCP tools for the graph `FraudGraph`.
@@ -801,17 +884,18 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
         temperature=0.0
     )
     
-    if not ai:
-        if async_groq_client:
+    client = genai.Client(api_key=gemini_key) if gemini_key and gemini_key != "your_gemini_api_key_here" else ai
+    
+    if not client:
+        if async_groq_client or (api_keys and api_keys.get("groq")):
             print("Gemini client not initialized, falling back to Groq...")
             return await agent1_groq_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
         if hf_client:
             print("Gemini client not initialized, falling back to Hugging Face...")
             return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
-        return "Error: GEMINI_API_KEY is not configured in .env."
+        return "Error: GEMINI_API_KEY is not configured in .env or UI."
 
-    # Try gemini-flash-latest primary
-    chat = ai.chats.create(model="gemini-flash-latest", config=config)
+    chat = client.chats.create(model=agent1_model, config=config)
     
     try:
         if ui_callback:

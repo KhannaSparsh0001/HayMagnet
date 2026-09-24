@@ -1,6 +1,7 @@
 import os
 import sys
 from contextlib import AsyncExitStack
+import asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from google.genai import types
@@ -92,8 +93,13 @@ class TigerGraphMCPClient:
             raise RuntimeError("MCP Client is not connected. Call connect() first.")
             
         try:
-            mcp_result = await self.session.call_tool(tool_name, arguments=args_dict)
+            mcp_result = await asyncio.wait_for(
+                self.session.call_tool(tool_name, arguments=args_dict),
+                timeout=45.0
+            )
             return str(mcp_result.content)
+        except asyncio.TimeoutError:
+            return f"Error: Tool execution timed out after 45 seconds."
         except Exception as e:
             return f"Error executing tool: {e}"
 

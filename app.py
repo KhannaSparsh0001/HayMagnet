@@ -6,7 +6,7 @@ import json
 
 # Import our modularized backend
 from tools import TigerGraphMCPClient
-from agent import get_fraud_rules, agent2_planner, agent3_critic, agent1_db_expert, format_final_verdict
+from agent import get_fraud_rules, agent2_planner_stream, agent3_critic, agent1_db_expert, format_final_verdict
 
 # Page configuration
 st.set_page_config(
@@ -51,13 +51,14 @@ async def run_investigation_ui(case_row):
     
     db_evidence = ""
     critic_feedback = ""
-    max_turns = 8
+#    max_turns = 8
+    max_turns = 5
     
     for turn in range(max_turns):
         with st.chat_message("assistant", avatar="🤖"):
             st.markdown(f"**Agent 2 (Lead Investigator) - Turn {turn+1}**")
-            with st.spinner("Analyzing rules and evidence..."):
-                action = agent2_planner(case_trigger, rules, db_evidence, feedback=critic_feedback)
+            # Stream the response live so the user can watch the AI think
+            action = st.write_stream(agent2_planner_stream(case_trigger, rules, db_evidence, feedback=critic_feedback))
             critic_feedback = "" 
             
             if "Final Verdict:" in action or turn == max_turns - 1:
@@ -103,8 +104,12 @@ async def run_investigation_ui(case_row):
             
         with st.chat_message("assistant", avatar="⚡"):
             st.markdown("**Agent 1 (DB Expert)**")
+            
+            def tool_ui_callback(tool_name, args):
+                st.info(f"🔧 **Executing Tool:** `{tool_name}`\n\n**Args:** `{json.dumps(args)}`")
+                
             with st.spinner("Executing TigerGraph queries via MCP..."):
-                new_evidence = await agent1_db_expert(mcp_client, action, tools)
+                new_evidence = await agent1_db_expert(mcp_client, action, tools, ui_callback=tool_ui_callback)
             
             db_evidence += f"\nRequest: {action}\nResult: {new_evidence}\n"
             

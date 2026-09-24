@@ -1,4 +1,5 @@
 import os
+import time
 import sys
 import asyncio
 import pandas as pd
@@ -124,7 +125,7 @@ def agent2_planner(case_trigger, rules, db_evidence, feedback=""):
     Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
     """
     completion = groq_client.chat.completions.create(
-        model="llama-3.1-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "system", "content": prompt}],
         temperature=0.0
     )
@@ -157,13 +158,51 @@ def agent3_critic(verdict, db_evidence, rules):
     REJECTED: [Detailed feedback on what the investigator needs to do instead]
     """
     completion = groq_client.chat.completions.create(
-        model="llama-3.1-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "system", "content": prompt}],
         temperature=0.0
     )
     return completion.choices[0].message.content
 
-async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction):
+def agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
+    """Groq Llama 3.1 70B acts as the Lead Investigator, yielding chunks for UI."""
+    if not groq_client:
+        yield "Final Verdict: Error - GROQ_API_KEY is not configured."
+        return
+        
+    prompt = f"""
+    You are the Lead Fraud Investigator. 
+    Your job is to determine if this case is fraudulent based on the rules.
+    
+    RULES:
+    {rules}
+    
+    CASE TRIGGER:
+    {case_trigger}
+    
+    DATABASE EVIDENCE GATHERED SO FAR:
+    {db_evidence if db_evidence else "None"}
+    
+    {f'OVERSEER FEEDBACK (CRITICAL): {feedback}' if feedback else ''}
+    
+    INSTRUCTIONS:
+    If you need more information from the TigerGraph database, output exactly:
+    Data Request: [Your plain english request for the DB expert, e.g., 'Find all transactions for card X']
+    
+    If you have enough information to make a decision based on the rules, output exactly:
+    Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
+    """
+    stream = groq_client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "system", "content": prompt}],
+        temperature=0.0,
+        stream=True
+    )
+    for chunk in stream:
+        if chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0].delta.content
+
+async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=None):
     """Fallback tool execution using Hugging Face Serverless API."""
     if not hf_client:
         return "Error: HF Fallback triggered but HF_TOKEN is not configured."
@@ -187,8 +226,12 @@ async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction
     messages.append(msg)
     
     for tool_call in msg.tool_calls:
-        print(f"  [HF Fallback] Running {tool_call.function.name}...")
         args_dict = json.loads(tool_call.function.arguments)
+        if ui_callback:
+            ui_callback(tool_call.function.name, args_dict)
+        else:
+            print(f"  [HF Fallback] Running {tool_call.function.name}...")
+            
         tool_output = await mcp_client.execute_tool(tool_call.function.name, args_dict)
         
         messages.append({
@@ -204,8 +247,8 @@ async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction
     )
     return final_resp.choices[0].message.content
 
-async def agent1_db_expert(mcp_client, data_request, tools):
-    """Gemini 2.5 Flash acts as the DB Expert with TigerGraph MCP Tools."""
+async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
+    """Gemini 3.6 Flash acts as the DB Expert with TigerGraph MCP Tools."""
     system_instruction = f"""
     You are an expert Graph Database Query Agent. You have access to TigerGraph MCP tools.
     Your goal is to answer the Lead Investigator's data request by calling the appropriate tools.
@@ -219,18 +262,41 @@ async def agent1_db_expert(mcp_client, data_request, tools):
         temperature=0.0
     )
     
-    chat = ai.chats.create(model="gemini-2.5-flash", config=config)
+    chat = ai.chats.create(model="gemini-3.6-flash", config=config)
     
     try:
-        response = chat.send_message(data_request)
+        if ui_callback:
+            ui_callback("STATUS_UPDATE", {"status": "Waiting for Gemini to plan tools..."})
+        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini 3.6 Flash...")
+        start_time = time.time()
+        
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(chat.send_message, data_request),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            print(f"[{time.strftime('%H:%M:%S')}] Error: Gemini request timed out!")
+            return "Error: Database Expert timed out while planning the query."
+            
+        elapsed = time.time() - start_time
+        print(f"[{time.strftime('%H:%M:%S')}] Gemini replied in {elapsed:.2f}s.")
+        
         if not response.function_calls:
             return response.text
             
         tool_responses = []
         for fc in response.function_calls:
-            print(f"  [Gemini] Running {fc.name}...")
             args_dict = {k: v for k, v in fc.args.items()} if hasattr(fc.args, "items") else fc.args
+            if ui_callback:
+                ui_callback(fc.name, args_dict)
+            else:
+                print(f"  [{time.strftime('%H:%M:%S')}] [Gemini] Running {fc.name}...")
+                
+            tool_start = time.time()
             tool_output = await mcp_client.execute_tool(fc.name, args_dict)
+            tool_elapsed = time.time() - tool_start
+            print(f"  [{time.strftime('%H:%M:%S')}] [Gemini] Tool {fc.name} completed in {tool_elapsed:.2f}s.")
             tool_responses.append(
                 types.Part.from_function_response(
                     name=fc.name,
@@ -238,14 +304,44 @@ async def agent1_db_expert(mcp_client, data_request, tools):
                 )
             )
             
-        final_resp = chat.send_message(tool_responses)
+        if ui_callback:
+            ui_callback("STATUS_UPDATE", {"status": "Gemini is synthesizing tool results..."})
+            
+        print(f"[{time.strftime('%H:%M:%S')}] Sending tool results back to Gemini for summary...")
+        final_start = time.time()
+        
+        # Bypass multi-turn function calling to avoid chained function_calls that crash the SDK.
+        # Force it to summarize the output statelessly.
+        raw_results = []
+        for p in tool_responses:
+            if p.function_response:
+                raw_results.append(str(p.function_response.response))
+                
+        summary_prompt = f"The database expert ran tools and got this JSON: {' | '.join(raw_results)}\n\nPlease summarize this graph data to answer the original request: {data_request}"
+        
+        try:
+            final_resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    ai.models.generate_content, 
+                    model="gemini-3.6-flash", 
+                    contents=summary_prompt,
+                    config=types.GenerateContentConfig(temperature=0.0)
+                ),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            print(f"[{time.strftime('%H:%M:%S')}] Error: Gemini final synthesis timed out!")
+            return "Error: Database Expert timed out while synthesizing the graph evidence."
+            
+        print(f"[{time.strftime('%H:%M:%S')}] Gemini final reply in {time.time() - final_start:.2f}s.")
         return final_resp.text
         
     except errors.APIError as e:
         error_str = str(e)
         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-            print("  [API Limit] Gemini exhausted. Falling back to Hugging Face...")
-            return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction)
+            if not ui_callback:
+                print("  [API Limit] Gemini exhausted. Falling back to Hugging Face...")
+            return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
         else:
             raise e
 

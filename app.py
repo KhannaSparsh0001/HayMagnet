@@ -31,70 +31,86 @@ if "is_running" not in st.session_state:
     st.session_state.is_running = False
 
 # ==========================================
-# PHASE 2: ASYNC INTEGRATION
+# PHASE 3: LIVE CHAT UI
 # ==========================================
 
 async def run_investigation_ui(case_row):
     case_trigger = case_row['trigger_text']
     case_id = case_row['case_id']
     
-    st.write("🔌 **Connecting to TigerGraph MCP Server...**")
-    mcp_client = TigerGraphMCPClient()
-    await mcp_client.connect()
+    with st.status("🔌 Connecting to TigerGraph MCP Server...", expanded=True) as status:
+        mcp_client = TigerGraphMCPClient()
+        await mcp_client.connect()
+        
+        rules = get_fraud_rules()
+        tools = await mcp_client.get_allowed_tools()
+        status.update(label=f"✅ Connected! Loaded {len(tools)} graph tools.", state="complete", expanded=False)
     
-    rules = get_fraud_rules()
-    tools = await mcp_client.get_allowed_tools()
-    st.write(f"✅ **Connected! Loaded {len(tools)} graph tools.**")
-    
-    st.write(f"🔍 **Starting Investigation on {case_id}**")
+    st.markdown(f"### 🔍 Investigating Case: `{case_id}`")
+    st.divider()
     
     db_evidence = ""
     critic_feedback = ""
     max_turns = 8
     
     for turn in range(max_turns):
-        st.write(f"--- **Turn {turn+1}** ---")
-        st.write("> 🤖 **Agent 2 (Groq) is analyzing...**")
-        
-        action = agent2_planner(case_trigger, rules, db_evidence, feedback=critic_feedback)
-        critic_feedback = "" 
-        
-        if "Final Verdict:" in action or turn == max_turns - 1:
-            st.write("> 🤖 **Agent 2 submitted a verdict.**")
-            st.write(action)
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown(f"**Agent 2 (Lead Investigator) - Turn {turn+1}**")
+            with st.spinner("Analyzing rules and evidence..."):
+                action = agent2_planner(case_trigger, rules, db_evidence, feedback=critic_feedback)
+            critic_feedback = "" 
             
-            st.write("> 🕵️ **Agent 3 (Critic) is reviewing...**")
-            review = agent3_critic(action, db_evidence, rules)
-            
-            if "APPROVED" in review or turn == max_turns - 1:
-                st.write("> ✅ **Agent 3 APPROVED the verdict.**")
+            if "Final Verdict:" in action or turn == max_turns - 1:
+                st.markdown(action)
                 
-                st.write("📝 **Formatting Final Output...**")
-                json_result = format_final_verdict(action, case_id)
-                if json_result:
-                    try:
-                        st.json(json.loads(json_result))
-                    except:
-                        st.write(json_result)
-                else:
-                    st.write("⚠️ JSON formatting failed.")
+                with st.chat_message("assistant", avatar="🕵️‍♂️"):
+                    st.markdown("**Agent 3 (Senior Overseer)**")
+                    with st.spinner("Reviewing verdict logic against fraud rules..."):
+                        review = agent3_critic(action, db_evidence, rules)
+                    
+                    if "APPROVED" in review or turn == max_turns - 1:
+                        st.success("✅ **Verdict Approved by Overseer!**")
+                        
+                        st.markdown("### 🛑 FINAL STRUCTURED VERDICT")
+                        json_result = format_final_verdict(action, case_id)
+                        if json_result:
+                            try:
+                                parsed = json.loads(json_result)
+                                decision = parsed.get("decision", "Unknown")
+                                reasoning = parsed.get("reasoning", "")
+                                
+                                if "Fraud" in decision:
+                                    st.error(f"### 🚨 {decision}\n\n**Reasoning:** {reasoning}")
+                                else:
+                                    st.success(f"### ✅ {decision}\n\n**Reasoning:** {reasoning}")
+                                    
+                                with st.expander("Raw JSON"):
+                                    st.json(parsed)
+                            except:
+                                st.write(json_result)
+                        else:
+                            st.warning("⚠️ JSON formatting failed.")
+                        
+                        await mcp_client.close()
+                        return
+                    else:
+                        st.error(f"🚨 **Verdict Rejected:** {review}")
+                        critic_feedback = review
+                        continue 
                 
-                await mcp_client.close()
-                return
-            else:
-                st.write(f"> 🚨 **Agent 3 REJECTED the verdict:** {review}")
-                critic_feedback = review
-                continue 
+            requested_data = action.replace('Data Request:', '').strip()
+            st.markdown(f"**Data Request:** _{requested_data}_")
             
-        requested_data = action.replace('Data Request:', '').strip()
-        st.write(f"> 🤖 **Agent 2 requested data:** {requested_data}")
-        
-        st.write("> ⚡ **Agent 1 (Gemini/HF) is executing graph queries...**")
-        new_evidence = await agent1_db_expert(mcp_client, action, tools)
-        
-        db_evidence += f"\nRequest: {action}\nResult: {new_evidence}\n"
-        st.write(f"> 📊 **Agent 1 retrieved {len(new_evidence)} characters of evidence.**")
-        
+        with st.chat_message("assistant", avatar="⚡"):
+            st.markdown("**Agent 1 (DB Expert)**")
+            with st.spinner("Executing TigerGraph queries via MCP..."):
+                new_evidence = await agent1_db_expert(mcp_client, action, tools)
+            
+            db_evidence += f"\nRequest: {action}\nResult: {new_evidence}\n"
+            
+            with st.expander(f"📊 Retrieved {len(new_evidence)} characters of graph data"):
+                st.code(new_evidence, language="json")
+                
     await mcp_client.close()
 
 # ==========================================
@@ -133,11 +149,10 @@ st.info(f"**Trigger Alert:** {selected_row['trigger_text']}")
 if st.button("Unleash Agents 🚀", use_container_width=True, type="primary", disabled=st.session_state.is_running):
     st.session_state.is_running = True
     
-    # We must use asyncio.run to kick off the async loop in sync Streamlit
     try:
         asyncio.run(run_investigation_ui(selected_row))
     except Exception as e:
         st.error(f"Investigation failed: {e}")
     finally:
         st.session_state.is_running = False
-        st.rerun() # Refresh the page to re-enable the button
+        st.rerun()

@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai import errors
-from groq import Groq
+from groq import Groq, AsyncGroq
 from huggingface_hub import InferenceClient
 
 # Import our modularized tools
@@ -27,6 +27,7 @@ ai = genai.Client(api_key=gemini_api_key)
 # Setup Groq (Primary Planner, Critic & Formatter)
 groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key) if groq_api_key and groq_api_key != "your_groq_api_key_here" else None
+async_groq_client = AsyncGroq(api_key=groq_api_key) if groq_api_key and groq_api_key != "your_groq_api_key_here" else None
 
 # Setup Hugging Face (Fallback DB Agent)
 hf_token = os.getenv("HF_TOKEN")
@@ -98,7 +99,7 @@ def format_final_verdict(verdict_text, case_id):
 # ==============================================================================
 
 def agent2_planner(case_trigger, rules, db_evidence, feedback=""):
-    """Groq Llama 3.1 70B acts as the Lead Investigator."""
+    """Groq GPT-OSS 120B acts as the Lead Investigator."""
     if not groq_client:
         return "Final Verdict: Error - GROQ_API_KEY is not configured."
         
@@ -132,7 +133,7 @@ def agent2_planner(case_trigger, rules, db_evidence, feedback=""):
     return completion.choices[0].message.content
 
 def agent3_critic(verdict, db_evidence, rules):
-    """Groq Llama 3.1 70B acts as the Senior Critic/Overseer."""
+    """Groq GPT-OSS 120B acts as the Senior Critic/Overseer."""
     if not groq_client:
         return "APPROVED" # Skip if no API key
         
@@ -165,7 +166,7 @@ def agent3_critic(verdict, db_evidence, rules):
     return completion.choices[0].message.content
 
 def agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
-    """Groq Llama 3.1 70B acts as the Lead Investigator, yielding chunks for UI."""
+    """Groq GPT-OSS 120B acts as the Lead Investigator, yielding chunks for UI."""
     if not groq_client:
         yield "Final Verdict: Error - GROQ_API_KEY is not configured."
         return
@@ -201,6 +202,110 @@ def agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
     for chunk in stream:
         if chunk.choices[0].delta.content is not None:
             yield chunk.choices[0].delta.content
+
+async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
+    """Groq GPT-OSS 120B acts as the Lead Investigator, yielding chunks asynchronously."""
+    if not async_groq_client:
+        yield "Final Verdict: Error - GROQ_API_KEY is not configured."
+        return
+        
+    prompt = f"""
+    You are the Lead Fraud Investigator. 
+    Your job is to determine if this case is fraudulent based on the rules.
+    
+    RULES:
+    {rules}
+    
+    CASE TRIGGER:
+    {case_trigger}
+    
+    DATABASE EVIDENCE GATHERED SO FAR:
+    {db_evidence if db_evidence else "None"}
+    
+    {f'OVERSEER FEEDBACK (CRITICAL): {feedback}' if feedback else ''}
+    
+    INSTRUCTIONS:
+    If you need more information from the TigerGraph database, output exactly:
+    Data Request: [Your plain english request for the DB expert, e.g., 'Find all transactions for card X']
+    
+    If you have enough information to make a decision based on the rules, output exactly:
+    Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
+    """
+    stream = await async_groq_client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "system", "content": prompt}],
+        temperature=0.0,
+        stream=True
+    )
+    async for chunk in stream:
+        if chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0].delta.content
+
+async def async_agent3_critic(verdict, db_evidence, rules):
+    """Async Groq Overseer."""
+    if not async_groq_client:
+        return "APPROVED"
+        
+    prompt = f"""
+    You are the Senior Fraud Overseer.
+    A Lead Investigator has submitted a Final Verdict for a case.
+    
+    RULES:
+    {rules}
+    
+    EVIDENCE GATHERED:
+    {db_evidence}
+    
+    SUBMITTED VERDICT:
+    {verdict}
+    
+    INSTRUCTIONS:
+    Critically analyze the verdict. Did the investigator hallucinate evidence? Did they misapply a rule?
+    If the verdict is sound and logically supported by the actual evidence gathered, output exactly:
+    APPROVED
+    
+    If the verdict is flawed, hallucinated, or incomplete, output exactly:
+    REJECTED: [Detailed feedback on what the investigator needs to do instead]
+    """
+    completion = await async_groq_client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "system", "content": prompt}],
+        temperature=0.0
+    )
+    return completion.choices[0].message.content
+
+async def async_format_final_verdict(verdict_text, case_id):
+    """Uses AsyncGroq to extract structured JSON from the unstructured verdict."""
+    if not async_groq_client:
+        return None
+        
+    prompt = f"""
+    Extract the final decision and reasoning from the following fraud investigator's verdict.
+    You must return a valid JSON object strictly adhering to this schema:
+    {{
+        "decision": "Confirmed Fraud" or "False Positive",
+        "reasoning": "A concise paragraph explaining the evidence."
+    }}
+    
+    Verdict Text:
+    {verdict_text}
+    """
+    try:
+        completion = await async_groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+        json_output = completion.choices[0].message.content
+        os.makedirs("cases", exist_ok=True)
+        file_path = f"cases/{case_id}.json"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(json_output)
+        return json_output
+    except Exception as e:
+        print(f"❌ Failed to format JSON for {case_id}: {e}")
+        return None
 
 async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=None):
     """Fallback tool execution using Hugging Face Serverless API."""
@@ -336,14 +441,13 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
         print(f"[{time.strftime('%H:%M:%S')}] Gemini final reply in {time.time() - final_start:.2f}s.")
         return final_resp.text
         
-    except errors.APIError as e:
+    except Exception as e:
         error_str = str(e)
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-            if not ui_callback:
-                print("  [API Limit] Gemini exhausted. Falling back to Hugging Face...")
+        print(f"  [Gemini Error: {error_str}] Falling back to Hugging Face...")
+        try:
             return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
-        else:
-            raise e
+        except Exception as hf_err:
+            return f"Error executing DB query: {error_str} (Fallback error: {hf_err})"
 
 async def investigate_case(mcp_client, case_trigger, tools, rules):
     db_evidence = ""

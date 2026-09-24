@@ -1,6 +1,7 @@
 import PyPDF2
+import os
 
-pdf_path = r"C:\Users\khann\.gemini\antigravity-ide\brain\b8687f02-95f5-4011-8161-68c87ffd03b1\.tempmediaStorage\media_1789898966134.pdf"
+pdf_path = "TigerGraph Agentic Fraud Investigation HHGOA.pdf"
 output_file = "fraud_rules.txt"
 
 print(f"Extracting rules from PDF...")

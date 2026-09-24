@@ -15,7 +15,8 @@ from agent import (
     async_agent2_planner_stream, 
     async_agent3_critic, 
     agent1_db_expert, 
-    async_format_final_verdict
+    async_format_final_verdict,
+    async_agent_failure_analyst
 )
 
 # Global state wrapper
@@ -113,6 +114,7 @@ async def investigate_case_stream(case_id: str):
         db_evidence = ""
         critic_feedback = ""
         max_turns = 5
+        verdict_approved = False
 
         for turn in range(max_turns):
             yield sse_format("turn_start", {"turn": turn + 1})
@@ -125,13 +127,13 @@ async def investigate_case_stream(case_id: str):
             
             critic_feedback = "" # reset after use
 
-            if "Final Verdict:" in planner_output or turn == max_turns - 1:
+            if "Final Verdict:" in planner_output:
                 yield sse_format("verdict_submitted", {"action": planner_output, "turn": turn + 1})
 
                 # Agent 3 Critic Review
                 yield sse_format("critic_start", {"turn": turn + 1})
                 review = await async_agent3_critic(planner_output, db_evidence, app_state.rules)
-                approved = ("APPROVED" in review) or (turn == max_turns - 1)
+                approved = "APPROVED" in review
 
                 yield sse_format("critic_review", {
                     "review": review,
@@ -140,6 +142,7 @@ async def investigate_case_stream(case_id: str):
                 })
 
                 if approved:
+                    verdict_approved = True
                     json_res = await async_format_final_verdict(planner_output, case_id)
                     yield sse_format("final_verdict", {
                         "case_id": case_id,
@@ -150,6 +153,8 @@ async def investigate_case_stream(case_id: str):
                     return
                 else:
                     critic_feedback = review
+                    if turn == max_turns - 1:
+                        break
                     continue
 
             # Data request phase
@@ -178,7 +183,15 @@ async def investigate_case_stream(case_id: str):
                 "turn": turn + 1
             })
 
-        yield sse_format("complete", {"status": "max_turns_reached", "case_id": case_id})
+        # If loop completed without an approved verdict -> Failure Analysis Agent
+        failure_analysis = await async_agent_failure_analyst(case_trigger, db_evidence, critic_feedback)
+        json_res = await async_format_final_verdict(failure_analysis, case_id, is_inconclusive=True)
+        yield sse_format("final_verdict", {
+            "case_id": case_id,
+            "raw_verdict": failure_analysis,
+            "json_verdict": json_res
+        })
+        yield sse_format("complete", {"status": "inconclusive", "case_id": case_id})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

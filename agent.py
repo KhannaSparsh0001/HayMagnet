@@ -274,8 +274,19 @@ async def async_agent3_critic(verdict, db_evidence, rules):
     )
     return completion.choices[0].message.content
 
-async def async_format_final_verdict(verdict_text, case_id):
+async def async_format_final_verdict(verdict_text, case_id, is_inconclusive=False):
     """Uses AsyncGroq to extract structured JSON from the unstructured verdict."""
+    if is_inconclusive:
+        json_obj = {
+            "decision": "Inconclusive / System Error",
+            "reasoning": verdict_text
+        }
+        os.makedirs("cases", exist_ok=True)
+        file_path = f"cases/{case_id}.json"
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(json_obj, f, indent=2)
+        return json.dumps(json_obj)
+
     if not async_groq_client:
         return None
         
@@ -283,8 +294,8 @@ async def async_format_final_verdict(verdict_text, case_id):
     Extract the final decision and reasoning from the following fraud investigator's verdict.
     You must return a valid JSON object strictly adhering to this schema:
     {{
-        "decision": "Confirmed Fraud" or "False Positive",
-        "reasoning": "A concise paragraph explaining the evidence."
+        "decision": "Confirmed Fraud", "False Positive", or "Inconclusive / System Error",
+        "reasoning": "A concise paragraph explaining the evidence or failure."
     }}
     
     Verdict Text:
@@ -307,53 +318,93 @@ async def async_format_final_verdict(verdict_text, case_id):
         print(f"❌ Failed to format JSON for {case_id}: {e}")
         return None
 
-async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=None):
-    """Fallback tool execution using Hugging Face Serverless API."""
-    if not hf_client:
-        return "Error: HF Fallback triggered but HF_TOKEN is not configured."
+async def agent1_groq_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=None):
+    """Fallback tool execution using Groq API (openai/gpt-oss-120b)."""
+    if not async_groq_client:
+        return "Error: Groq Fallback triggered but GROQ_API_KEY is not configured."
         
-    hf_tools = [convert_mcp_to_openai_schema(t) for t in tools]
+    groq_tools = [convert_mcp_to_openai_schema(t) for t in tools]
     messages = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": data_request}
     ]
     
-    response = hf_client.chat.completions.create(
-        model="meta-llama/Meta-Llama-3-70B-Instruct",
-        messages=messages,
-        tools=hf_tools
-    )
-    
-    msg = response.choices[0].message
-    if not msg.tool_calls:
-        return msg.content
+    try:
+        response = await async_groq_client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            tools=groq_tools,
+            temperature=0.0
+        )
         
-    messages.append(msg)
-    
-    for tool_call in msg.tool_calls:
-        args_dict = json.loads(tool_call.function.arguments)
-        if ui_callback:
-            ui_callback(tool_call.function.name, args_dict)
-        else:
-            print(f"  [HF Fallback] Running {tool_call.function.name}...")
+        msg = response.choices[0].message
+        if not msg.tool_calls:
+            return msg.content or "No relevant evidence returned by Groq fallback model."
             
-        tool_output = await mcp_client.execute_tool(tool_call.function.name, args_dict)
+        messages.append(msg)
         
-        messages.append({
-            "role": "tool",
-            "name": tool_call.function.name,
-            "content": str(tool_output),
-            "tool_call_id": tool_call.id
-        })
+        for tool_call in msg.tool_calls:
+            args_dict = json.loads(tool_call.function.arguments)
+            if ui_callback:
+                ui_callback(tool_call.function.name, args_dict)
+            else:
+                print(f"  [Groq Fallback] Running {tool_call.function.name}...")
+                
+            tool_output = await mcp_client.execute_tool(tool_call.function.name, args_dict)
+            
+            messages.append({
+                "role": "tool",
+                "name": tool_call.function.name,
+                "content": str(tool_output),
+                "tool_call_id": tool_call.id
+            })
+            
+        final_resp = await async_groq_client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            temperature=0.0
+        )
+        return final_resp.choices[0].message.content or "Database query complete."
+    except Exception as e:
+        return f"Groq Fallback tool execution error: {e}"
+
+async def async_agent_failure_analyst(case_trigger, db_evidence, last_critic_review=""):
+    """Analyzes an inconclusive investigation execution trace and provides a clear human diagnostic summary."""
+    if not async_groq_client:
+        return "Investigation inconclusive. System encountered an error and could not complete evidence gathering."
         
-    final_resp = hf_client.chat.completions.create(
-        model="meta-llama/Meta-Llama-3-70B-Instruct",
-        messages=messages
-    )
-    return final_resp.choices[0].message.content
+    prompt = f"""
+    You are an AI Forensic Analyst. An automated fraud investigation was unable to reach a conclusive decision.
+    Your task is to analyze the failure trace below and explain clearly to a human fraud manager why no decision could be drawn.
+    
+    CASE TRIGGER:
+    {case_trigger}
+    
+    DATABASE EVIDENCE / ERRORS ENCOUNTERED:
+    {db_evidence if db_evidence else "No evidence retrieved (Database queries failed or timed out)."}
+    
+    LAST OVERSEER CRITIC REVIEW:
+    {last_critic_review if last_critic_review else "None"}
+    
+    INSTRUCTIONS:
+    Provide a concise, professional, human-readable summary (2-4 sentences) explaining:
+    1. What step failed or why evidence was insufficient.
+    2. The impact on the fraud risk assessment.
+    3. What manual or system action is required next.
+    Do NOT declare "Confirmed Fraud" or "False Positive". Focus strictly on diagnosing the investigation failure.
+    """
+    try:
+        completion = await async_groq_client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.0
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Investigation incomplete: Encountered system errors during database retrieval and analysis trace ({e})."
 
 async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
-    """Gemini 3.6 Flash acts as the DB Expert with TigerGraph MCP Tools."""
+    """Gemini 2.5 Flash acts as the DB Expert with TigerGraph MCP Tools."""
     system_instruction = f"""
     You are an expert Graph Database Query Agent. You have access to TigerGraph MCP tools.
     Your goal is to answer the Lead Investigator's data request by calling the appropriate tools.
@@ -367,12 +418,13 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
         temperature=0.0
     )
     
-    chat = ai.chats.create(model="gemini-3.6-flash", config=config)
+    # Try gemini-2.5-flash primary
+    chat = ai.chats.create(model="gemini-2.5-flash", config=config)
     
     try:
         if ui_callback:
             ui_callback("STATUS_UPDATE", {"status": "Waiting for Gemini to plan tools..."})
-        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini 3.6 Flash...")
+        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini 2.5 Flash...")
         start_time = time.time()
         
         try:
@@ -415,8 +467,6 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
         print(f"[{time.strftime('%H:%M:%S')}] Sending tool results back to Gemini for summary...")
         final_start = time.time()
         
-        # Bypass multi-turn function calling to avoid chained function_calls that crash the SDK.
-        # Force it to summarize the output statelessly.
         raw_results = []
         for p in tool_responses:
             if p.function_response:
@@ -428,7 +478,7 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
             final_resp = await asyncio.wait_for(
                 asyncio.to_thread(
                     ai.models.generate_content, 
-                    model="gemini-3.6-flash", 
+                    model="gemini-2.5-flash", 
                     contents=summary_prompt,
                     config=types.GenerateContentConfig(temperature=0.0)
                 ),
@@ -443,11 +493,11 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
         
     except Exception as e:
         error_str = str(e)
-        print(f"  [Gemini Error: {error_str}] Falling back to Hugging Face...")
+        print(f"  [Gemini Error: {error_str}] Falling back to Groq...")
         try:
-            return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
-        except Exception as hf_err:
-            return f"Error executing DB query: {error_str} (Fallback error: {hf_err})"
+            return await agent1_groq_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
+        except Exception as groq_err:
+            return f"Error executing DB query: {error_str} (Groq Fallback error: {groq_err})"
 
 async def investigate_case(mcp_client, case_trigger, tools, rules):
     db_evidence = ""

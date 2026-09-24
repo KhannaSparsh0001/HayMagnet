@@ -15,16 +15,33 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Glassmorphism CSS & Styling
+# Custom Glassmorphism CSS & Strict Dark Theme Enforcement across all themes
 st.markdown("""
 <style>
-    .main {
-        background-color: #0b0f19;
-        color: #e2e8f0;
+    /* Force Dark Theme across Main & Sidebar regardless of browser light/dark mode */
+    html, body, .stApp, .main, [data-testid="stSidebar"], section[data-testid="stSidebar"] {
+        background-color: #0b0f19 !important;
+        background: radial-gradient(circle at 50% 0%, #111827, #0b0f19) !important;
+        color: #e2e8f0 !important;
     }
-    .stApp {
-        background: radial-gradient(circle at 50% 0%, #111827, #0b0f19);
+    
+    /* Ensure sidebar text and containers are crisp dark slate */
+    [data-testid="stSidebar"] {
+        background-color: #0f172a !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
     }
+    [data-testid="stSidebar"] * {
+        color: #e2e8f0 !important;
+    }
+    
+    /* Input fields and selectbox dropdowns dark theme styling */
+    div[data-baseweb="input"], div[data-baseweb="select"], .stTextInput input, .stSelectbox div {
+        background-color: #1e293b !important;
+        color: #f8fafc !important;
+        border-radius: 8px !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    }
+    
     .metric-card {
         background: rgba(30, 41, 59, 0.7);
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -33,6 +50,7 @@ st.markdown("""
         backdrop-filter: blur(10px);
         margin-bottom: 12px;
     }
+    
     .status-badge {
         display: inline-block;
         padding: 4px 12px;
@@ -44,8 +62,8 @@ st.markdown("""
     .badge-warning { background-color: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid #f59e0b; }
     .badge-error { background-color: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; }
     .badge-info { background-color: rgba(0, 242, 254, 0.2); color: #00f2fe; border: 1px solid #00f2fe; }
-    .rule-pill-pass { background-color: #064e3b; color: #34d399; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
-    .rule-pill-fail { background-color: #7f1d1d; color: #f87171; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
+    .rule-pill-pass { background-color: #064e3b; color: #34d399; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
+    .rule-pill-fail { background-color: #7f1d1d; color: #f87171; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,33 +116,46 @@ with st.sidebar:
     st.divider()
     
     # ⚙️ API KEYS & PER-AGENT MODEL SELECTION
-    st.markdown("### ⚙️ API & Model Configuration")
+    st.markdown("### ⚙️ API Keys & Model Providers")
     
     gemini_key = st.text_input("Google Gemini API Key", value=os.getenv("GEMINI_API_KEY", ""), type="password")
     groq_key = st.text_input("Groq API Key", value=os.getenv("GROQ_API_KEY", ""), type="password")
+    hf_key = st.text_input("Hugging Face Token (HF_TOKEN)", value=os.getenv("HF_TOKEN", ""), type="password")
 
     has_gemini = bool(gemini_key and gemini_key != "your_gemini_api_key_here")
     has_groq = bool(groq_key and groq_key != "your_groq_api_key_here")
+    has_hf = bool(hf_key and hf_key != "your_huggingface_token_here")
 
     # Build dynamic model option list based on active keys
     gemini_models = ["gemini-2.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"] if has_gemini else []
     groq_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile"] if has_groq else []
-    
+    hf_models = ["meta-llama/Meta-Llama-3-70B-Instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1"] if has_hf else []
+
     available_models = []
-    if has_gemini:
-        available_models.extend(gemini_models)
-    if has_groq:
-        available_models.extend(groq_models)
+    if has_gemini: available_models.extend(gemini_models)
+    if has_groq: available_models.extend(groq_models)
+    if has_hf: available_models.extend(hf_models)
     available_models.append("✨ Custom Model (Specify)...")
 
-    if not has_gemini and not has_groq:
-        st.warning("⚠️ Enter a Gemini or Groq API Key above to enable model selection.")
+    if not has_gemini and not has_groq and not has_hf:
+        st.warning("⚠️ Enter a Gemini, Groq, or Hugging Face API Key above to enable model selection.")
         agent1_model, agent2_model, agent3_model = "gemini-2.5-flash", "openai/gpt-oss-120b", "openai/gpt-oss-120b"
     else:
         st.markdown("#### Per-Agent Preferred Models")
-        agent1_choice = st.selectbox("🤖 Agent 1 (DB Expert):", options=available_models, index=0)
-        agent2_choice = st.selectbox("🕵️ Agent 2 (Lead Analyst):", options=available_models, index=min(1, len(available_models)-1))
-        agent3_choice = st.selectbox("⚖️ Agent 3 (Senior Overseer):", options=available_models, index=min(1, len(available_models)-1))
+        
+        # Smart pre-selection index helpers
+        def get_default_idx(target_model, model_list):
+            if target_model in model_list:
+                return model_list.index(target_model)
+            return 0
+
+        idx1 = get_default_idx("gemini-2.5-flash", available_models)
+        idx2 = get_default_idx("openai/gpt-oss-120b", available_models)
+        idx3 = get_default_idx("openai/gpt-oss-120b", available_models)
+
+        agent1_choice = st.selectbox("🤖 Agent 1 (DB Expert):", options=available_models, index=idx1)
+        agent2_choice = st.selectbox("🕵️ Agent 2 (Lead Analyst):", options=available_models, index=idx2)
+        agent3_choice = st.selectbox("⚖️ Agent 3 (Senior Overseer):", options=available_models, index=idx3)
 
         # Handle Custom Model Specification & Live Testing
         def resolve_custom_model(choice, label, default_name):
@@ -138,9 +169,11 @@ with st.sidebar:
                     if st.button("⚡ Test", key=f"test_{label}"):
                         with st.spinner("Pinging..."):
                             try:
+                                prov = "gemini" if "gemini" in custom_name else ("hf" if ("llama" in custom_name or "mistral" in custom_name) else "groq")
+                                key_used = gemini_key if prov == "gemini" else (hf_key if prov == "hf" else groq_key)
                                 res = requests.get(
                                     f"{BACKEND_URL}/api/test-model",
-                                    params={"model_name": custom_name, "api_key": gemini_key if "gemini" in custom_name else groq_key},
+                                    params={"provider": prov, "model_name": custom_name, "api_key": key_used},
                                     timeout=10
                                 )
                                 data = res.json()
@@ -204,6 +237,7 @@ with tab_single:
         query_params = {
             "gemini_key": gemini_key,
             "groq_key": groq_key,
+            "hf_key": hf_key,
             "agent1_model": agent1_model,
             "agent2_model": agent2_model,
             "agent3_model": agent3_model
@@ -361,6 +395,7 @@ with tab_batch:
                     params={
                         "gemini_key": gemini_key,
                         "groq_key": groq_key,
+                        "hf_key": hf_key,
                         "agent1_model": agent1_model,
                         "agent2_model": agent2_model,
                         "agent3_model": agent3_model

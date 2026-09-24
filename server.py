@@ -107,6 +107,7 @@ async def investigate_case_stream(
     case_id: str,
     gemini_key: str = None,
     groq_key: str = None,
+    hf_key: str = None,
     agent1_model: str = None,
     agent2_model: str = None,
     agent3_model: str = None
@@ -121,7 +122,7 @@ async def investigate_case_stream(
     row = case_rows.iloc[0].to_dict()
     case_trigger = row.get('trigger_text', '')
 
-    api_keys = {"gemini": gemini_key, "groq": groq_key}
+    api_keys = {"gemini": gemini_key, "groq": groq_key, "hf": hf_key}
     models = {"agent1": agent1_model, "agent2": agent2_model, "agent3": agent3_model}
 
     async def event_generator():

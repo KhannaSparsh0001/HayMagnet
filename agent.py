@@ -106,6 +106,8 @@ async def test_model_connection(provider: str, model_name: str, api_key: str = N
     if not provider_clean or provider_clean == "auto":
         if "gemini" in model_name.lower():
             provider_clean = "gemini"
+        elif "meta-llama" in model_name.lower() or "mistral" in model_name.lower() or "hf" in model_name.lower():
+            provider_clean = "hf"
         else:
             provider_clean = "groq"
             
@@ -141,6 +143,20 @@ async def test_model_connection(provider: str, model_name: str, api_key: str = N
             return {"ok": True, "message": f"Successfully connected to Groq model '{model_name}'!"}
         except Exception as e:
             return {"ok": False, "error": f"Groq Error: {str(e)}"}
+
+    elif provider_clean in ["hf", "huggingface"]:
+        token = api_key or os.getenv("HF_TOKEN")
+        if not token or token == "your_huggingface_token_here":
+            return {"ok": False, "error": "HF_TOKEN is missing or not provided."}
+        try:
+            def _test_hf():
+                client = InferenceClient(api_key=token)
+                res = client.text_generation("ping", model=model_name, max_new_tokens=2)
+                return res
+            await asyncio.to_thread(_test_hf)
+            return {"ok": True, "message": f"Successfully connected to Hugging Face model '{model_name}'!"}
+        except Exception as e:
+            return {"ok": False, "error": f"Hugging Face Error: {str(e)}"}
     else:
         return {"ok": False, "error": f"Unsupported model provider '{provider}'"}
 

@@ -6,3 +6,4 @@ google-genai
 PyPDF2
 groq
 huggingface_hub
+streamlit

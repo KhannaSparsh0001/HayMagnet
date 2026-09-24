@@ -340,30 +340,38 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
         if not msg.tool_calls:
             return msg.content or "No relevant evidence returned by Groq fallback model."
             
-        messages.append(msg)
-        
+        tool_results = []
         for tool_call in msg.tool_calls:
-            args_dict = json.loads(tool_call.function.arguments)
+            args_dict = json.loads(tool_call.function.arguments) if isinstance(tool_call.function.arguments, str) else tool_call.function.arguments
             if ui_callback:
                 ui_callback(tool_call.function.name, args_dict)
             else:
                 print(f"  [Groq Fallback] Running {tool_call.function.name}...")
                 
             tool_output = await mcp_client.execute_tool(tool_call.function.name, args_dict)
+            tool_results.append(f"Tool `{tool_call.function.name}`: {tool_output}")
             
-            messages.append({
-                "role": "tool",
-                "name": tool_call.function.name,
-                "content": str(tool_output),
-                "tool_call_id": tool_call.id
-            })
-            
-        final_resp = await async_groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            temperature=0.0
-        )
-        return final_resp.choices[0].message.content or "Database query complete."
+        summary_messages = [
+            {
+                "role": "system",
+                "content": "You are a graph database expert. Summarize the following retrieved graph database evidence to answer the investigator's question clearly. Do NOT call any tools or output JSON."
+            },
+            {
+                "role": "user",
+                "content": f"Investigator Question: {data_request}\n\nRetrieved Graph Evidence:\n{' | '.join(tool_results)}"
+            }
+        ]
+        
+        try:
+            final_resp = await async_groq_client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=summary_messages,
+                temperature=0.0
+            )
+            return final_resp.choices[0].message.content or "\n".join(tool_results)
+        except Exception as sum_err:
+            print(f"  [Groq Fallback summary error: {sum_err}], returning raw evidence.")
+            return "\n".join(tool_results)
     except Exception as e:
         return f"Groq Fallback tool execution error: {e}"
 
@@ -426,13 +434,13 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
             return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
         return "Error: GEMINI_API_KEY is not configured in .env."
 
-    # Try gemini-2.5-flash primary
-    chat = ai.chats.create(model="gemini-2.5-flash", config=config)
+    # Try gemini-3.6-flash primary
+    chat = ai.chats.create(model="gemini-3.6-flash", config=config)
     
     try:
         if ui_callback:
             ui_callback("STATUS_UPDATE", {"status": "Waiting for Gemini to plan tools..."})
-        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini 2.5 Flash...")
+        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini 3.6 Flash...")
         start_time = time.time()
         
         try:
@@ -486,7 +494,7 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
             final_resp = await asyncio.wait_for(
                 asyncio.to_thread(
                     ai.models.generate_content, 
-                    model="gemini-2.5-flash", 
+                    model="gemini-3.6-flash", 
                     contents=summary_prompt,
                     config=types.GenerateContentConfig(temperature=0.0)
                 ),

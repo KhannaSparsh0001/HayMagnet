@@ -20,7 +20,7 @@ HayMagnet is an intelligent, multi-agent fraud investigation platform built to a
 
 This project is not just a database app with a few prompts. The intelligence is built into the workflow:
 
-- **Agent 1: DB Expert** uses **Google Gemini 2.5 Flash** to interpret the investigation request and call TigerGraph MCP tools.
+- **Agent 1: DB Expert** uses **Google Gemini 3.6 Flash** to interpret the investigation request and call TigerGraph MCP tools.
 - **Agent 2: Lead Investigator** uses **Groq Llama 3.1 70B** to reason about fraud rules, evidence, and next steps.
 - **Agent 3: Senior Overseer** uses a second Groq model to review the final verdict and reject hallucinated or incomplete conclusions.
 - **Fallback path** automatically switches to **Hugging Face Serverless Llama** when Gemini faces API rate limits.

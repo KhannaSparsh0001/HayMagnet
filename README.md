@@ -1,10 +1,18 @@
-# HayMagnet 🤖🧲
+<table align="center">
+  <tr>
+    <td align="center" width="220">
+      <img src="logo.png" alt="HayMagnet logo" width="180" />
+    </td>
+    <td align="center" width="220">
+      <h1>HayMagnet</h1>
+      <p><strong>AI Fraud Investigator</strong></p>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
-  <img src="logo.png" alt="HayMagnet logo" width="220" />
+  <strong>AI-powered fraud investigation system for Hacker House Goa 2026</strong>
 </p>
-
-**AI-powered fraud investigation system for Hacker House Goa 2026**
 
 HayMagnet is an intelligent, multi-agent fraud investigation platform built to analyze suspicious transactions by combining graph analytics, retrieval, and LLM-driven reasoning. Instead of a single chatbot, the system uses multiple specialized AI agents to investigate a case, retrieve evidence from TigerGraph, and validate the final verdict before producing a structured result.
 

@@ -19,10 +19,9 @@ load_dotenv()
 
 # Setup Gemini (Primary DB Agent)
 gemini_api_key = os.getenv("GEMINI_API_KEY")
-if not gemini_api_key:
-    print("ERROR: GEMINI_API_KEY not found in .env file!")
-    sys.exit(1)
-ai = genai.Client(api_key=gemini_api_key)
+ai = genai.Client(api_key=gemini_api_key) if gemini_api_key and gemini_api_key != "your_gemini_api_key_here" else None
+if not ai:
+    print("Warning: GEMINI_API_KEY not set in .env. LLM calls requiring Gemini will require API key setup.")
 
 # Setup Groq (Primary Planner, Critic & Formatter)
 groq_api_key = os.getenv("GROQ_API_KEY")
@@ -262,6 +261,12 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
         temperature=0.0
     )
     
+    if not ai:
+        if hf_client:
+            print("Gemini client not initialized, falling back to Hugging Face...")
+            return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
+        return "Error: GEMINI_API_KEY is not configured in .env."
+
     chat = ai.chats.create(model="gemini-3.6-flash", config=config)
     
     try:

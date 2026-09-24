@@ -114,3 +114,18 @@ class TigerGraphMCPClient:
             await self._exit_stack.aclose()
             self._exit_stack = None
             self.session = None
+
+async def write_case_to_graph(mcp_client, case_id, outcome, pattern, exposure_usd):
+    """Deterministically writes closed case findings back into TigerGraph for Case Memory."""
+    if not mcp_client or not mcp_client.session:
+        return False, f"CASE-2016-{case_id}"
+    graph_case_id = f"CASE-2016-{case_id}"
+    gsql_cmd = f'USE GRAPH FraudGraph\nINSERT INTO ClosedCase VALUES ("{graph_case_id}", "{case_id}", "{outcome}", "{pattern}", {exposure_usd});'
+    try:
+        res = await mcp_client.execute_tool("tigergraph__gsql", {"command": gsql_cmd})
+        print(f"  [Case Memory] Persisted case {case_id} ({graph_case_id}) to TigerGraph: {res}")
+        return True, graph_case_id
+    except Exception as e:
+        print(f"  [Case Memory Warn] Failed to write case {case_id} to TigerGraph: {e}")
+        return False, graph_case_id
+

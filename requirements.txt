@@ -11,3 +11,4 @@ tigergraph-mcp==1.0.3
 mcp
 pypdf
 huggingface_hub
+pydantic

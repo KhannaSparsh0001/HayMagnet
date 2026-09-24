@@ -148,7 +148,7 @@ async def investigate_case_stream(case_id: str):
 
                     if approved:
                         verdict_approved = True
-                        json_res = await async_format_final_verdict(planner_output, case_id)
+                        json_res = await async_format_final_verdict(planner_output, case_id, mcp_client=app_state.mcp_client)
                         yield sse_format("final_verdict", {
                             "case_id": case_id,
                             "raw_verdict": planner_output,
@@ -190,7 +190,8 @@ async def investigate_case_stream(case_id: str):
 
             # If loop completed without an approved verdict -> Failure Analysis Agent
             failure_analysis = await async_agent_failure_analyst(case_trigger, db_evidence, critic_feedback)
-            json_res = await async_format_final_verdict(failure_analysis, case_id, is_inconclusive=True)
+            json_res = await async_format_final_verdict(failure_analysis, case_id, is_inconclusive=True, mcp_client=app_state.mcp_client)
+
             yield sse_format("final_verdict", {
                 "case_id": case_id,
                 "raw_verdict": failure_analysis,

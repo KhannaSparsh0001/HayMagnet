@@ -15,42 +15,44 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Glassmorphism CSS & Strict Dark Theme Enforcement across all themes
+# Custom High-Contrast Enterprise Light Mode CSS
 st.markdown("""
 <style>
-    /* Force Dark Theme across Main & Sidebar regardless of browser light/dark mode */
-    html, body, .stApp, .main, [data-testid="stSidebar"], section[data-testid="stSidebar"] {
-        background-color: #0b0f19 !important;
-        background: radial-gradient(circle at 50% 0%, #111827, #0b0f19) !important;
-        color: #e2e8f0 !important;
+    /* Global Page Styling */
+    html, body, .stApp {
+        background-color: #f8fafc !important;
+        color: #0f172a !important;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
     }
     
-    /* Ensure sidebar text and containers are crisp dark slate */
+    /* Clean Light Sidebar */
     [data-testid="stSidebar"] {
-        background-color: #0f172a !important;
-        border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
+        background-color: #ffffff !important;
+        border-right: 1px solid #e2e8f0 !important;
     }
     [data-testid="stSidebar"] * {
-        color: #e2e8f0 !important;
+        color: #0f172a !important;
     }
     
-    /* Input fields and selectbox dropdowns dark theme styling */
-    div[data-baseweb="input"], div[data-baseweb="select"], .stTextInput input, .stSelectbox div {
-        background-color: #1e293b !important;
-        color: #f8fafc !important;
-        border-radius: 8px !important;
-        border: 1px solid rgba(255, 255, 255, 0.15) !important;
-    }
-    
+    /* Card Containers */
     .metric-card {
-        background: rgba(30, 41, 59, 0.7);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
         border-radius: 12px;
         padding: 16px;
-        backdrop-filter: blur(10px);
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
         margin-bottom: 12px;
     }
     
+    /* Input & Select Box Light Styling */
+    div[data-baseweb="input"], div[data-baseweb="select"], .stTextInput input, .stSelectbox div {
+        background-color: #ffffff !important;
+        color: #0f172a !important;
+        border-radius: 8px !important;
+        border: 1px solid #cbd5e1 !important;
+    }
+    
+    /* Status Badges */
     .status-badge {
         display: inline-block;
         padding: 4px 12px;
@@ -58,12 +60,26 @@ st.markdown("""
         font-weight: 600;
         font-size: 0.85rem;
     }
-    .badge-success { background-color: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid #10b981; }
-    .badge-warning { background-color: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid #f59e0b; }
-    .badge-error { background-color: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; }
-    .badge-info { background-color: rgba(0, 242, 254, 0.2); color: #00f2fe; border: 1px solid #00f2fe; }
-    .rule-pill-pass { background-color: #064e3b; color: #34d399; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
-    .rule-pill-fail { background-color: #7f1d1d; color: #f87171; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
+    .badge-success { background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+    .badge-warning { background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+    .badge-error { background-color: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .badge-info { background-color: #e0f2fe; color: #075985; border: 1px solid #bae6fd; }
+    
+    /* Policy Rule Pills */
+    .rule-pill-pass { background-color: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 0.78rem; margin-right: 4px; display: inline-block; }
+    .rule-pill-fail { background-color: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 0.78rem; margin-right: 4px; display: inline-block; }
+
+    /* Button Styling */
+    .stButton>button {
+        background-color: #4f46e5 !important;
+        color: #ffffff !important;
+        border-radius: 8px !important;
+        border: none !important;
+        font-weight: 600 !important;
+    }
+    .stButton>button:hover {
+        background-color: #4338ca !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 

@@ -1,0 +1,4 @@
+{
+  "decision": "Inconclusive / System Error",
+  "reasoning": "The data request returned only the graph schema and no actual transaction, card, device, or ClosedCase records, so the system could not retrieve the details for transaction\u202f3478782, its recent history, or any linked fraud alerts. Without those concrete data points the risk model cannot be validated or a fraud decision made. A manual query against the\u202fFraudGraph\u202fdatabase (or a corrected API call) is needed to pull the transaction vertex and its related card, device, IP/merchant, and case vertices, after which the investigation can be completed."
+}

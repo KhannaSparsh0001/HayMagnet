@@ -35,12 +35,15 @@ This makes HayMagnet a real AI-driven investigation pipeline rather than a stati
 HayMagnet is built around a graph-native fraud investigation pipeline:
 
 ### 1. Schema Provisioning
+
 `setup_graph.py` provisions the `FraudGraph` schema in TigerGraph Cloud using `pyTigerGraph` and secure environment secrets.
 
 ### 2. Data Ingestion
+
 `load_data.py` streams the large IEEE-CIS dataset in chunks for efficient ingestion into the graph database.
 
 ### 3. Multi-Agent AI Engine
+
 `agent.py` orchestrates the full investigation loop:
 
 - parse fraud rules
@@ -50,6 +53,7 @@ HayMagnet is built around a graph-native fraud investigation pipeline:
 - save a structured final verdict
 
 ### 4. Decoupled Client-Server Execution
+
 `server.py` acts as the FastAPI backend managing the asynchronous agent workflows via Server-Sent Events (SSE). `app.py` provides the Streamlit UI client where users can select a case and watch the agents collaborate in real time without blocking.
 
 ---
@@ -137,7 +141,7 @@ Simply run the following command to automatically boot both the FastAPI backend 
 python run.py
 ```
 
-*(Note: The frontend will gracefully poll and wait for the backend to come online before rendering.)*
+_(Note: The frontend will gracefully poll and wait for the backend to come online before rendering.)_
 
 ---
 
@@ -147,4 +151,4 @@ HayMagnet aims to demonstrate how AI agents can work together to investigate fin
 
 ---
 
-*Built with ❤️ and ☕ for Hacker House Goa.*
+_Built with ❤️ and ☕ for Hacker House Goa._

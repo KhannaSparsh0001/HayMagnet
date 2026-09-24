@@ -84,6 +84,63 @@ async def async_groq_stream_with_fallback(messages, temperature=0.0, candidate_m
 hf_token = os.getenv("HF_TOKEN")
 hf_client = InferenceClient(api_key=hf_token) if hf_token and hf_token != "your_huggingface_token_here" else None
 
+# Global cached schema strategy
+CACHED_GRAPH_SCHEMA_STRATEGY = ""
+
+async def init_graph_schema_strategy(mcp_client):
+    """Pre-processing step: Fetches TigerGraph schema at server startup, prepares query strategy, and caches it."""
+    global CACHED_GRAPH_SCHEMA_STRATEGY
+    if CACHED_GRAPH_SCHEMA_STRATEGY:
+        return CACHED_GRAPH_SCHEMA_STRATEGY
+
+    print("[PRE-PROCESSING] Fetching graph schema from TigerGraph MCP...")
+    try:
+        raw_schema = await mcp_client.execute_tool("tigergraph__get_graph_schema", {"graph_name": "FraudGraph"})
+        strategy_summary = f"""
+=== GRAPH DATABASE SCHEMA & QUERY STRATEGY (CACHED AT INITIALIZATION) ===
+GRAPH NAME: FraudGraph
+
+VERTEX TYPES & ATTRIBUTES:
+- Customer (primary_id: customer_id)
+- Card (primary_id: card_id)
+- Transaction (primary_id: transaction_id, attributes: risk_score, ts, amount, channel)
+- DeviceProfile (primary_id: device_id)
+- EmailDomain (primary_id: email)
+- BillingRegion (primary_id: region_code)
+- ClosedCase (primary_id: case_id, attributes: outcome, pattern, exposure_usd)
+
+EDGE CONNECTIONS & TRAVERSAL PATHS:
+- Customer -[OWNS]-> Card
+- Card -[MADE]-> Transaction
+- Transaction -[FROM_DEVICE]-> DeviceProfile
+- Transaction -[PURCHASER_EMAIL]-> EmailDomain
+- Transaction -[BILLED_IN]-> BillingRegion
+- Transaction -[NEXT_TXN]-> Transaction
+- ClosedCase -[INVOLVES]-> Transaction
+- ClosedCase -[ON_CARD]-> Card
+- ClosedCase -[CONNECTED_TO]-> Card
+
+EXACT TOOL SELECTION GUIDANCE FOR AGENTS:
+1. To find transactions for a card ID (e.g. C-123):
+   -> Call tigergraph__get_node_edges with vertex_type='Card', vertex_id='<card_id>', edge_type='MADE'
+2. To find device details or transactions for a transaction ID (e.g. 3478782):
+   -> Call tigergraph__get_node_edges with vertex_type='Transaction', vertex_id='<txn_id>', edge_type='FROM_DEVICE'
+3. To find prior fraud cases / alerts linked to a card or transaction:
+   -> Call tigergraph__get_node_edges with vertex_type='Card', vertex_id='<card_id>', edge_type='ON_CARD' (or INVOLVES)
+4. To inspect specific vertex attributes:
+   -> Call tigergraph__get_node with vertex_type='<type>', vertex_id='<id>'
+
+CRITICAL RULE: The schema above is ALREADY fully loaded. DO NOT execute tigergraph__get_graph_schema again.
+==========================================================================
+"""
+        CACHED_GRAPH_SCHEMA_STRATEGY = strategy_summary
+        print("[PRE-PROCESSING] Graph Schema & Query Strategy cached in memory successfully.")
+        return CACHED_GRAPH_SCHEMA_STRATEGY
+    except Exception as e:
+        print(f"[PRE-PROCESSING WARN] Failed to fetch schema during startup: {e}")
+        CACHED_GRAPH_SCHEMA_STRATEGY = "FraudGraph Schema: Vertices (Customer, Card, Transaction, DeviceProfile, ClosedCase). Edges: MADE, FROM_DEVICE, ON_CARD, INVOLVES."
+        return CACHED_GRAPH_SCHEMA_STRATEGY
+
 def get_fraud_rules():
     rules_file = "fraud_rules.txt"
     if not os.path.exists(rules_file):
@@ -268,6 +325,8 @@ async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback
     You are the Lead Fraud Investigator. 
     Your job is to determine if this case is fraudulent based on the rules.
     
+    {CACHED_GRAPH_SCHEMA_STRATEGY if CACHED_GRAPH_SCHEMA_STRATEGY else ''}
+    
     RULES:
     {rules}
     
@@ -435,9 +494,10 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
                 args_dict = {}
             
             # Map aliases and normalize tool names
-            if "gremlin" in t_name.lower():
+            if "gremlin" in t_name.lower() or "run_query" in t_name.lower() or "gsql" in t_name.lower():
                 query_str = args_dict.get("query", "")
                 card_match = re.search(r"\b(C-[\w\-]+)\b", query_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
+                txn_match = re.search(r"\b(\d{7})\b", query_str) or re.search(r"\b(\d{7})\b", data_request)
                 if card_match:
                     card_id = card_match.group(1)
                     t_name = "tigergraph__get_node_edges"
@@ -447,10 +507,25 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
                         "vertex_id": card_id,
                         "edge_type": "MADE"
                     }
+                elif txn_match:
+                    txn_id = txn_match.group(1)
+                    t_name = "tigergraph__get_node_edges"
+                    args_dict = {
+                        "graph_name": "FraudGraph",
+                        "vertex_type": "Transaction",
+                        "vertex_id": txn_id,
+                        "edge_type": "FROM_DEVICE"
+                    }
                 else:
+                    if CACHED_GRAPH_SCHEMA_STRATEGY:
+                        tool_results.append(f"Tool `tigergraph__get_graph_schema`: {CACHED_GRAPH_SCHEMA_STRATEGY}")
+                        continue
                     t_name = "tigergraph__get_graph_schema"
                     args_dict = {"graph_name": "FraudGraph"}
-            elif "details" in t_name.lower() or t_name in ["show_graph_details", "tigergraph__show_graph_details"]:
+            elif "schema" in t_name.lower() or "details" in t_name.lower():
+                if CACHED_GRAPH_SCHEMA_STRATEGY:
+                    tool_results.append(f"Tool `tigergraph__get_graph_schema`: {CACHED_GRAPH_SCHEMA_STRATEGY}")
+                    continue
                 t_name = "tigergraph__get_graph_schema"
                 args_dict = {"graph_name": "FraudGraph"}
             elif not t_name.startswith("tigergraph__"):
@@ -488,32 +563,23 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
         error_str = str(e)
         print(f"  [Groq Fallback Exception Caught]: {error_str[:200]}")
         
-        # 1. Attempt recovery from failed_generation if Groq refused an unlisted function
-        failed_gen_match = re.search(r"['\"]failed_generation['\"]\s*:\s*['\"](\{.*?\})['\"]\s*\}", error_str, re.DOTALL)
-        if failed_gen_match:
+        # 1. Attempt recovery for transaction ID or card ID
+        txn_match = re.search(r"\b(\d{7})\b", error_str) or re.search(r"\b(\d{7})\b", data_request)
+        if txn_match:
+            txn_id = txn_match.group(1)
+            print(f"  [Groq Fallback Recovery] Extracting edges for transaction {txn_id}...")
             try:
-                gen_raw = failed_gen_match.group(1).replace("\\'", "'").replace('\\"', '"')
-                parsed_gen = json.loads(gen_raw)
-                p_name = parsed_gen.get("name", "")
-                p_args = parsed_gen.get("arguments", {})
-                if "gremlin" in p_name:
-                    query_str = str(p_args)
-                    c_match = re.search(r"\b(C-[\w\-]+)\b", query_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
-                    if c_match:
-                        edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {
-                            "graph_name": "FraudGraph",
-                            "vertex_type": "Card",
-                            "vertex_id": c_match.group(1),
-                            "edge_type": "MADE"
-                        })
-                        return f"Retrieved transactions for card {c_match.group(1)}: {edges}"
-                elif "schema" in p_name or "details" in p_name:
-                    schema_res = await mcp_client.execute_tool("tigergraph__get_graph_schema", {"graph_name": "FraudGraph"})
-                    return f"Retrieved FraudGraph schema: {schema_res}"
-            except Exception as gen_err:
-                print(f"  [Groq Fallback Failed Gen Recovery Error]: {gen_err}")
-                
-        # 2. Direct recovery by searching for card ID in error or original request
+                edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {
+                    "graph_name": "FraudGraph",
+                    "vertex_type": "Transaction",
+                    "vertex_id": txn_id,
+                    "edge_type": "FROM_DEVICE"
+                })
+                return f"Retrieved device/connection records for transaction {txn_id}: {edges}"
+            except Exception as rec_err:
+                print(f"  [Groq Fallback Recovery Txn Edge Error]: {rec_err}")
+
+        # 2. Direct recovery by searching for card ID
         card_match = re.search(r"\b(C-[\w\-]+)\b", error_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
         if card_match:
             card_id = card_match.group(1)
@@ -529,7 +595,9 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
             except Exception as rec_err:
                 print(f"  [Groq Fallback Recovery Edge Error]: {rec_err}")
                 
-        # 3. Last-resort fallback: fetch schema directly so the pipeline never halts with 400
+        # 3. Last-resort fallback: return cached schema strategy
+        if CACHED_GRAPH_SCHEMA_STRATEGY:
+            return CACHED_GRAPH_SCHEMA_STRATEGY
         try:
             schema_res = await mcp_client.execute_tool("tigergraph__get_graph_schema", {"graph_name": "FraudGraph"})
             return f"FraudGraph Schema Evidence (retrieved via direct fallback): {schema_res}"
@@ -575,6 +643,8 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
     system_instruction = f"""
     You are an expert Graph Database Query Agent for TigerGraph.
     You have direct access to TigerGraph MCP tools for the graph `FraudGraph`.
+    
+    {CACHED_GRAPH_SCHEMA_STRATEGY if CACHED_GRAPH_SCHEMA_STRATEGY else ''}
     
     AVAILABLE TOOLS:
     1. `tigergraph__get_node_edges`: To find transactions made by a card, call with:
@@ -733,6 +803,9 @@ async def main():
     rules = get_fraud_rules()
     tools = await mcp_client.get_allowed_tools()
     print(f"Connected! Loaded {len(tools)} graph tools.")
+    
+    # Pre-processing graph schema & query strategy
+    await init_graph_schema_strategy(mcp_client)
     
     df = pd.read_csv("HHGOA_IEEE/case_pack.csv")
     

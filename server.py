@@ -12,6 +12,7 @@ import uvicorn
 from tools import TigerGraphMCPClient
 from agent import (
     get_fraud_rules, 
+    init_graph_schema_strategy,
     async_agent2_planner_stream, 
     async_agent3_critic, 
     agent1_db_expert, 
@@ -50,6 +51,9 @@ async def lifespan(app: FastAPI):
     await app_state.mcp_client.connect()
     app_state.tools = await app_state.mcp_client.get_allowed_tools()
     print(f"[MCP] TigerGraph MCP Connected! {len(app_state.tools)} graph tools active.")
+
+    # Pre-processing graph schema & query strategy
+    await init_graph_schema_strategy(app_state.mcp_client)
 
     yield
 

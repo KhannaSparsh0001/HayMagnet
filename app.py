@@ -117,7 +117,10 @@ async def run_investigation_ui(case_row):
 # SIDEBAR
 # ==========================================
 with st.sidebar:
-    st.title("HayMagnet 🧲")
+    if os.path.exists("logo.png"):
+        st.image("logo.png", use_container_width=True)
+    else:
+        st.title("HayMagnet 🧲")
     st.header("Case Selection")
     
     if df is not None:

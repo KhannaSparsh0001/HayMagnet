@@ -606,13 +606,13 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
             return await agent1_hf_fallback(mcp_client, data_request, tools, system_instruction, ui_callback=ui_callback)
         return "Error: GEMINI_API_KEY is not configured in .env."
 
-    # Try gemini-3.6-flash primary
-    chat = ai.chats.create(model="gemini-3.6-flash", config=config)
+    # Try gemini-flash-latest primary
+    chat = ai.chats.create(model="gemini-flash-latest", config=config)
     
     try:
         if ui_callback:
             ui_callback("STATUS_UPDATE", {"status": "Waiting for Gemini to plan tools..."})
-        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini 3.6 Flash...")
+        print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini Flash...")
         start_time = time.time()
         
         try:
@@ -666,7 +666,7 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
             final_resp = await asyncio.wait_for(
                 asyncio.to_thread(
                     ai.models.generate_content, 
-                    model="gemini-3.6-flash", 
+                    model="gemini-flash-latest", 
                     contents=summary_prompt,
                     config=types.GenerateContentConfig(temperature=0.0)
                 ),

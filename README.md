@@ -20,7 +20,7 @@ HayMagnet is an intelligent, multi-agent fraud investigation platform built to a
 
 This project is not just a database app with a few prompts. The intelligence is built into the workflow:
 
-- **Agent 1: DB Expert** uses **Google Gemini 2.5 Flash** to interpret the investigation request and call TigerGraph MCP tools.
+- **Agent 1: DB Expert** uses **Google Gemini 3.6 Flash** to interpret the investigation request and call TigerGraph MCP tools.
 - **Agent 2: Lead Investigator** uses **Groq Llama 3.1 70B** to reason about fraud rules, evidence, and next steps.
 - **Agent 3: Senior Overseer** uses a second Groq model to review the final verdict and reject hallucinated or incomplete conclusions.
 - **Fallback path** automatically switches to **Hugging Face Serverless Llama** when Gemini faces API rate limits.
@@ -49,16 +49,17 @@ HayMagnet is built around a graph-native fraud investigation pipeline:
 - review the decision for logic errors
 - save a structured final verdict
 
-### 4. Live Dashboard
-`app.py` provides a Streamlit-based UI where users can select a case and watch the agents collaborate in real time.
+### 4. Decoupled Client-Server Execution
+`server.py` acts as the FastAPI backend managing the asynchronous agent workflows via Server-Sent Events (SSE). `app.py` provides the Streamlit UI client where users can select a case and watch the agents collaborate in real time without blocking.
 
 ---
 
 ## Key Components
 
 - `agent.py` — orchestration logic for the investigation agents
+- `server.py` — FastAPI backend for asynchronous agent execution and SSE streaming
 - `tools.py` — TigerGraph MCP client and schema conversion utilities
-- `app.py` — Streamlit web dashboard
+- `app.py` — Streamlit web dashboard client
 - `setup_graph.py` — graph schema creation
 - `load_data.py` — data ingestion pipeline
 - `extract_rules.py` — extracts fraud heuristics into `fraud_rules.txt`
@@ -128,13 +129,15 @@ pip install -r requirements.txt
 
 ### Run
 
-Batch mode:
+The application runs in a decoupled architecture requiring two separate processes.
+
+1. Start the FastAPI backend server (runs on port 8000):
 
 ```bash
-python agent.py
+python server.py
 ```
 
-Live dashboard:
+2. Start the Streamlit live dashboard (runs on port 8501):
 
 ```bash
 streamlit run app.py

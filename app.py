@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
-import os
-import asyncio
+import requests
 import json
+import os
 
-# Import our modularized backend
-from tools import TigerGraphMCPClient
-from agent import get_fraud_rules, agent2_planner_stream, agent3_critic, agent1_db_expert, format_final_verdict
+BACKEND_URL = "http://127.0.0.1:8000"
 
 # Page configuration
 st.set_page_config(
@@ -15,152 +13,162 @@ st.set_page_config(
     layout="wide"
 )
 
-# Phase 1: Environment & UI Scaffolding
-
-@st.cache_data
-def load_data():
+# Fetch cases from Backend API (with fallback to local CSV)
+@st.cache_data(ttl=5)
+def get_cases():
+    try:
+        res = requests.get(f"{BACKEND_URL}/api/cases", timeout=3)
+        if res.status_code == 200:
+            return pd.DataFrame(res.json()["cases"])
+    except Exception:
+        pass
+    
     csv_path = "HHGOA_IEEE/case_pack.csv"
     if os.path.exists(csv_path):
         return pd.read_csv(csv_path)
     return None
 
-df = load_data()
+df = get_cases()
 
-# Initialize session state for investigation running
-if "is_running" not in st.session_state:
-    st.session_state.is_running = False
+# Check server health
+def check_server():
+    try:
+        res = requests.get(f"{BACKEND_URL}/", timeout=2)
+        return res.status_code == 200, res.json() if res.status_code == 200 else {}
+    except Exception:
+        return False, {}
 
-# ==========================================
-# PHASE 3: LIVE CHAT UI
-# ==========================================
+server_online, server_info = check_server()
 
-async def run_investigation_ui(case_row):
-    case_trigger = case_row['trigger_text']
-    case_id = case_row['case_id']
-    
-    with st.status("🔌 Connecting to TigerGraph MCP Server...", expanded=True) as status:
-        mcp_client = TigerGraphMCPClient()
-        await mcp_client.connect()
-        
-        rules = get_fraud_rules()
-        tools = await mcp_client.get_allowed_tools()
-        status.update(label=f"✅ Connected! Loaded {len(tools)} graph tools.", state="complete", expanded=False)
-    
-    st.markdown(f"### 🔍 Investigating Case: `{case_id}`")
-    st.divider()
-    
-    db_evidence = ""
-    critic_feedback = ""
-#    max_turns = 8
-    max_turns = 5
-    
-    for turn in range(max_turns):
-        with st.chat_message("assistant", avatar="🤖"):
-            st.markdown(f"**Agent 2 (Lead Investigator) - Turn {turn+1}**")
-            # Stream the response live so the user can watch the AI think
-            action = st.write_stream(agent2_planner_stream(case_trigger, rules, db_evidence, feedback=critic_feedback))
-            critic_feedback = "" 
-            
-            if "Final Verdict:" in action or turn == max_turns - 1:
-                st.markdown(action)
-                
-                with st.chat_message("assistant", avatar="🕵️‍♂️"):
-                    st.markdown("**Agent 3 (Senior Overseer)**")
-                    with st.spinner("Reviewing verdict logic against fraud rules..."):
-                        review = agent3_critic(action, db_evidence, rules)
-                    
-                    if "APPROVED" in review or turn == max_turns - 1:
-                        st.success("✅ **Verdict Approved by Overseer!**")
-                        
-                        st.markdown("### 🛑 FINAL STRUCTURED VERDICT")
-                        json_result = format_final_verdict(action, case_id)
-                        if json_result:
-                            try:
-                                parsed = json.loads(json_result)
-                                decision = parsed.get("decision", "Unknown")
-                                reasoning = parsed.get("reasoning", "")
-                                
-                                if "Fraud" in decision:
-                                    st.error(f"### 🚨 {decision}\n\n**Reasoning:** {reasoning}")
-                                else:
-                                    st.success(f"### ✅ {decision}\n\n**Reasoning:** {reasoning}")
-                                    
-                                with st.expander("Raw JSON"):
-                                    st.json(parsed)
-                            except:
-                                st.write(json_result)
-                        else:
-                            st.warning("⚠️ JSON formatting failed.")
-                        
-                        await mcp_client.close()
-                        return
-                    else:
-                        st.error(f"🚨 **Verdict Rejected:** {review}")
-                        critic_feedback = review
-                        continue 
-                
-            requested_data = action.replace('Data Request:', '').strip()
-            st.markdown(f"**Data Request:** _{requested_data}_")
-            
-        with st.chat_message("assistant", avatar="⚡"):
-            st.markdown("**Agent 1 (DB Expert)**")
-            
-            def tool_ui_callback(tool_name, args):
-                st.info(f"🔧 **Executing Tool:** `{tool_name}`\n\n**Args:** `{json.dumps(args)}`")
-                
-            with st.spinner("Executing TigerGraph queries via MCP..."):
-                new_evidence = await agent1_db_expert(mcp_client, action, tools, ui_callback=tool_ui_callback)
-            
-            db_evidence += f"\nRequest: {action}\nResult: {new_evidence}\n"
-            
-            with st.expander(f"📊 Retrieved {len(new_evidence)} characters of graph data"):
-                st.code(new_evidence, language="json")
-                
-    await mcp_client.close()
-
-# ==========================================
-# SIDEBAR
-# ==========================================
+# Sidebar
 with st.sidebar:
     if os.path.exists("logo.png"):
         st.image("logo.png", use_container_width=True)
     else:
         st.title("HayMagnet 🧲")
+        
+    st.header("System Status")
+    if server_online:
+        st.success(f"🟢 **Backend Online** ({server_info.get('tools_count', 0)} MCP Tools Active)")
+    else:
+        st.error("🔴 **Backend Offline**\n\nPlease run `python server.py` in a separate terminal.")
+        st.info("```bash\npython server.py\n```")
+
+    st.divider()
     st.header("Case Selection")
-    
-    if df is not None:
+
+    if df is not None and not df.empty:
         case_ids = df['case_id'].tolist()
-        selected_case_id = st.selectbox("Select a Case ID:", case_ids, disabled=st.session_state.is_running)
-        
+        selected_case_id = st.selectbox("Select a Case ID:", case_ids)
+
         selected_row = df[df['case_id'] == selected_case_id].iloc[0]
-        
+
         st.divider()
         st.subheader("Case Metadata")
         st.write(f"**Timestamp:** {selected_row.get('ts', 'N/A')}")
         st.write(f"**Trigger Type:** {selected_row.get('trigger_type', 'N/A')}")
-        
+
         risk_score = selected_row.get('risk_score', 'N/A')
         st.metric("Risk Score", risk_score)
-        
     else:
-        st.error("Could not find HHGOA_IEEE/case_pack.csv")
+        st.error("Could not load case dataset.")
         st.stop()
 
-# ==========================================
-# MAIN PANEL
-# ==========================================
+# Main Panel
 st.title("🤖 Autonomous Fraud Investigator")
 st.markdown("Watch the multi-agent system investigate TigerGraph in real-time.")
 
 st.info(f"**Trigger Alert:** {selected_row['trigger_text']}")
 
-if st.button("Unleash Agents 🚀", use_container_width=True, type="primary", disabled=st.session_state.is_running):
-    st.session_state.is_running = True
-    
+def run_investigation_stream(case_id):
+    st.markdown(f"### 🔍 Investigating Case: `{case_id}`")
+    st.divider()
+
     try:
-        asyncio.run(run_investigation_ui(selected_row))
+        response = requests.get(f"{BACKEND_URL}/api/investigate/{case_id}", stream=True, timeout=300)
     except Exception as e:
-        st.error(f"Investigation failed: {e}")
-    finally:
-        st.session_state.is_running = False
-        st.rerun()
+        st.error(f"Failed to connect to backend server: {e}")
+        return
+
+    current_event = None
+    planner_container = None
+    planner_text = ""
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+        line_str = line.decode('utf-8')
+
+        if line_str.startswith('event: '):
+            current_event = line_str[7:].strip()
+        elif line_str.startswith('data: '):
+            data_str = line_str[6:].strip()
+            try:
+                data = json.loads(data_str)
+            except Exception:
+                continue
+
+            # Process Event Types
+            if current_event == "turn_start":
+                turn = data.get("turn", 1)
+                st.markdown(f"#### 🔄 Turn {turn}")
+                planner_container = st.empty()
+                planner_text = ""
+
+            elif current_event == "planner_chunk":
+                chunk = data.get("chunk", "")
+                planner_text += chunk
+                if planner_container:
+                    planner_container.markdown(f"🤖 **Lead Investigator (Agent 2):**\n\n{planner_text}")
+
+            elif current_event == "data_request":
+                req = data.get("request", "")
+                st.info(f"⚡ **Data Request to DB Expert:** _{req}_")
+
+            elif current_event == "tool_exec":
+                t_name = data.get("tool_name", "")
+                t_args = data.get("args", {})
+                st.caption(f"🔧 Executing TigerGraph Tool: `{t_name}` with parameters: `{json.dumps(t_args)}`")
+
+            elif current_event == "evidence_retrieved":
+                ev = data.get("evidence", "")
+                length = data.get("evidence_length", 0)
+                with st.expander(f"📊 Retrieved {length} characters of graph evidence"):
+                    st.code(ev, language="json")
+
+            elif current_event == "critic_start":
+                st.caption("🕵️‍♂️ **Agent 3 (Senior Overseer):** Reviewing verdict logic...")
+
+            elif current_event == "critic_review":
+                review = data.get("review", "")
+                approved = data.get("approved", False)
+                if approved:
+                    st.success(f"✅ **Overseer Approved Verdict:**\n\n{review}")
+                else:
+                    st.error(f"🚨 **Overseer Rejected Verdict:**\n\n{review}")
+
+            elif current_event == "final_verdict":
+                st.markdown("---")
+                st.markdown("### 🛑 FINAL STRUCTURED VERDICT")
+                json_raw = data.get("json_verdict")
+                if json_raw:
+                    try:
+                        parsed = json.loads(json_raw)
+                        decision = parsed.get("decision", "Unknown")
+                        reasoning = parsed.get("reasoning", "")
+                        if "Fraud" in decision:
+                            st.error(f"### 🚨 Decision: {decision}\n\n**Reasoning:** {reasoning}")
+                        else:
+                            st.success(f"### ✅ Decision: {decision}\n\n**Reasoning:** {reasoning}")
+                        with st.expander("Raw Verdict JSON"):
+                            st.json(parsed)
+                    except Exception:
+                        st.write(json_raw)
+                else:
+                    st.warning("Final verdict text received but structured JSON formatting failed.")
+
+            elif current_event == "complete":
+                st.balloons()
+
+if st.button("Unleash Agents 🚀", use_container_width=True, type="primary", disabled=not server_online):
+    run_investigation_stream(selected_case_id)

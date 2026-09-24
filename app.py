@@ -94,81 +94,89 @@ def run_investigation_stream(case_id):
     planner_container = None
     planner_text = ""
 
-    for line in response.iter_lines():
-        if not line:
-            continue
-        line_str = line.decode('utf-8')
-
-        if line_str.startswith('event: '):
-            current_event = line_str[7:].strip()
-        elif line_str.startswith('data: '):
-            data_str = line_str[6:].strip()
-            try:
-                data = json.loads(data_str)
-            except Exception:
+    try:
+        for line in response.iter_lines():
+            if not line:
                 continue
+            line_str = line.decode('utf-8')
 
-            # Process Event Types
-            if current_event == "turn_start":
-                turn = data.get("turn", 1)
-                st.markdown(f"#### 🔄 Turn {turn}")
-                planner_container = st.empty()
-                planner_text = ""
+            if line_str.startswith('event: '):
+                current_event = line_str[7:].strip()
+            elif line_str.startswith('data: '):
+                data_str = line_str[6:].strip()
+                try:
+                    data = json.loads(data_str)
+                except Exception:
+                    continue
 
-            elif current_event == "planner_chunk":
-                chunk = data.get("chunk", "")
-                planner_text += chunk
-                if planner_container:
-                    planner_container.markdown(f"🤖 **Lead Investigator (Agent 2):**\n\n{planner_text}")
+                # Process Event Types
+                if current_event == "error":
+                    st.error(f"⚠️ Backend Investigation Error: {data.get('error')}")
 
-            elif current_event == "data_request":
-                req = data.get("request", "")
-                st.info(f"⚡ **Data Request to DB Expert:** _{req}_")
+                elif current_event == "turn_start":
+                    turn = data.get("turn", 1)
+                    st.markdown(f"#### 🔄 Turn {turn}")
+                    planner_container = st.empty()
+                    planner_text = ""
 
-            elif current_event == "tool_exec":
-                t_name = data.get("tool_name", "")
-                t_args = data.get("args", {})
-                st.caption(f"🔧 Executing TigerGraph Tool: `{t_name}` with parameters: `{json.dumps(t_args)}`")
+                elif current_event == "planner_chunk":
+                    chunk = data.get("chunk", "")
+                    planner_text += chunk
+                    if planner_container:
+                        planner_container.markdown(f"🤖 **Lead Investigator (Agent 2):**\n\n{planner_text}")
 
-            elif current_event == "evidence_retrieved":
-                ev = data.get("evidence", "")
-                length = data.get("evidence_length", 0)
-                with st.expander(f"📊 Retrieved {length} characters of graph evidence"):
-                    st.code(ev, language="json")
+                elif current_event == "data_request":
+                    req = data.get("request", "")
+                    st.info(f"⚡ **Data Request to DB Expert:** _{req}_")
 
-            elif current_event == "critic_start":
-                st.caption("🕵️‍♂️ **Agent 3 (Senior Overseer):** Reviewing verdict logic...")
+                elif current_event == "tool_exec":
+                    t_name = data.get("tool_name", "")
+                    t_args = data.get("args", {})
+                    st.caption(f"🔧 Executing TigerGraph Tool: `{t_name}` with parameters: `{json.dumps(t_args)}`")
 
-            elif current_event == "critic_review":
-                review = data.get("review", "")
-                approved = data.get("approved", False)
-                if approved:
-                    st.success(f"✅ **Overseer Approved Verdict:**\n\n{review}")
-                else:
-                    st.error(f"🚨 **Overseer Rejected Verdict:**\n\n{review}")
+                elif current_event == "evidence_retrieved":
+                    ev = data.get("evidence", "")
+                    length = data.get("evidence_length", 0)
+                    with st.expander(f"📊 Retrieved {length} characters of graph evidence"):
+                        st.code(ev, language="json")
 
-            elif current_event == "final_verdict":
-                st.markdown("---")
-                st.markdown("### 🛑 FINAL STRUCTURED VERDICT")
-                json_raw = data.get("json_verdict")
-                if json_raw:
-                    try:
-                        parsed = json.loads(json_raw)
-                        decision = parsed.get("decision", "Unknown")
-                        reasoning = parsed.get("reasoning", "")
-                        if "Fraud" in decision:
-                            st.error(f"### 🚨 Decision: {decision}\n\n**Reasoning:** {reasoning}")
-                        else:
-                            st.success(f"### ✅ Decision: {decision}\n\n**Reasoning:** {reasoning}")
-                        with st.expander("Raw Verdict JSON"):
-                            st.json(parsed)
-                    except Exception:
-                        st.write(json_raw)
-                else:
-                    st.warning("Final verdict text received but structured JSON formatting failed.")
+                elif current_event == "critic_start":
+                    st.caption("🕵️‍♂️ **Agent 3 (Senior Overseer):** Reviewing verdict logic...")
 
-            elif current_event == "complete":
-                st.balloons()
+                elif current_event == "critic_review":
+                    review = data.get("review", "")
+                    approved = data.get("approved", False)
+                    if approved:
+                        st.success(f"✅ **Overseer Approved Verdict:**\n\n{review}")
+                    else:
+                        st.error(f"🚨 **Overseer Rejected Verdict:**\n\n{review}")
+
+                elif current_event == "final_verdict":
+                    st.markdown("---")
+                    st.markdown("### 🛑 FINAL STRUCTURED VERDICT")
+                    json_raw = data.get("json_verdict")
+                    if json_raw:
+                        try:
+                            parsed = json.loads(json_raw)
+                            decision = parsed.get("decision", "Unknown")
+                            reasoning = parsed.get("reasoning", "")
+                            if "Fraud" in decision:
+                                st.error(f"### 🚨 Decision: {decision}\n\n**Reasoning:** {reasoning}")
+                            else:
+                                st.success(f"### ✅ Decision: {decision}\n\n**Reasoning:** {reasoning}")
+                            with st.expander("Raw Verdict JSON"):
+                                st.json(parsed)
+                        except Exception:
+                            st.write(json_raw)
+                    else:
+                        st.warning("Final verdict text received but structured JSON formatting failed.")
+
+                elif current_event == "complete":
+                    st.balloons()
+    except requests.exceptions.RequestException as req_err:
+        st.error(f"Investigation stream was interrupted: {req_err}")
+    except Exception as e:
+        st.error(f"Error processing investigation stream: {e}")
 
 if st.button("Unleash Agents 🚀", use_container_width=True, type="primary", disabled=not server_online):
     run_investigation_stream(selected_case_id)

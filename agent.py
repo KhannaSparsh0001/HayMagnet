@@ -29,6 +29,57 @@ groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key) if groq_api_key and groq_api_key != "your_groq_api_key_here" else None
 async_groq_client = AsyncGroq(api_key=groq_api_key) if groq_api_key and groq_api_key != "your_groq_api_key_here" else None
 
+GROQ_CANDIDATE_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
+
+async def async_groq_completion_with_fallback(messages, tools=None, temperature=0.0, response_format=None, candidate_models=None):
+    """Executes a Groq chat completion with automatic model fallback across candidate models."""
+    if not async_groq_client:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
+    if candidate_models is None:
+        candidate_models = GROQ_CANDIDATE_MODELS
+    last_err = None
+    for model in candidate_models:
+        try:
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature
+            }
+            if tools:
+                kwargs["tools"] = tools
+            if response_format:
+                kwargs["response_format"] = response_format
+            return await async_groq_client.chat.completions.create(**kwargs)
+        except Exception as e:
+            last_err = e
+            print(f"  [Groq Fallback Chain] Model {model} failed: {e}. Trying next candidate...")
+            continue
+    raise last_err
+
+async def async_groq_stream_with_fallback(messages, temperature=0.0, candidate_models=None):
+    """Streams a Groq chat completion with automatic model fallback across candidate models."""
+    if not async_groq_client:
+        yield "Final Verdict: Error - GROQ_API_KEY is not configured."
+        return
+    if candidate_models is None:
+        candidate_models = GROQ_CANDIDATE_MODELS
+    for model in candidate_models:
+        try:
+            stream = await async_groq_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                stream=True
+            )
+            async for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+            return
+        except Exception as e:
+            print(f"  [Groq Stream Chain] Model {model} failed: {e}. Trying next candidate...")
+            continue
+    yield "Final Verdict: Inconclusive / System Error - LLM rate limit or connection failure occurred."
+
 # Setup Hugging Face (Fallback DB Agent)
 hf_token = os.getenv("HF_TOKEN")
 hf_client = InferenceClient(api_key=hf_token) if hf_token and hf_token != "your_huggingface_token_here" else None
@@ -76,23 +127,25 @@ def format_final_verdict(verdict_text, case_id):
     {verdict_text}
     """
     
-    try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
-        json_output = completion.choices[0].message.content
-        os.makedirs("cases", exist_ok=True)
-        file_path = f"cases/{case_id}.json"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(json_output)
-        print(f"✅ Verdict for {case_id} successfully structured and saved to {file_path}")
-        return json_output
-    except Exception as e:
-        print(f"❌ Failed to format JSON for {case_id} via Groq: {e}")
-        return None
+    for model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]:
+        try:
+            completion = groq_client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+            json_output = completion.choices[0].message.content
+            os.makedirs("cases", exist_ok=True)
+            file_path = f"cases/{case_id}.json"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(json_output)
+            print(f"✅ Verdict for {case_id} successfully structured and saved to {file_path}")
+            return json_output
+        except Exception as e:
+            continue
+    print(f"❌ Failed to format JSON for {case_id} via Groq")
+    return None
 
 # ==============================================================================
 # PHASE 3 & 4: CORE ENGINE (AGENTS 1, 2, AND 3)
@@ -204,11 +257,13 @@ def agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
             yield chunk.choices[0].delta.content
 
 async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback=""):
-    """Groq GPT-OSS 120B acts as the Lead Investigator, yielding chunks asynchronously."""
+    """Groq acts as the Lead Investigator, yielding chunks asynchronously with multi-model fallback."""
     if not async_groq_client:
         yield "Final Verdict: Error - GROQ_API_KEY is not configured."
         return
         
+    capped_evidence = db_evidence[-4000:] if len(db_evidence) > 4000 else db_evidence
+    
     prompt = f"""
     You are the Lead Fraud Investigator. 
     Your job is to determine if this case is fraudulent based on the rules.
@@ -220,7 +275,7 @@ async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback
     {case_trigger}
     
     DATABASE EVIDENCE GATHERED SO FAR:
-    {db_evidence if db_evidence else "None"}
+    {capped_evidence if capped_evidence else "None"}
     
     {f'OVERSEER FEEDBACK (CRITICAL): {feedback}' if feedback else ''}
     
@@ -231,21 +286,16 @@ async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback
     If you have enough information to make a decision based on the rules, output exactly:
     Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
     """
-    stream = await async_groq_client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[{"role": "system", "content": prompt}],
-        temperature=0.0,
-        stream=True
-    )
-    async for chunk in stream:
-        if chunk.choices[0].delta.content is not None:
-            yield chunk.choices[0].delta.content
+    messages = [{"role": "system", "content": prompt}]
+    async for chunk in async_groq_stream_with_fallback(messages):
+        yield chunk
 
 async def async_agent3_critic(verdict, db_evidence, rules):
-    """Async Groq Overseer."""
+    """Async Groq Overseer with multi-model fallback."""
     if not async_groq_client:
         return "APPROVED"
         
+    capped_evidence = db_evidence[-3000:] if len(db_evidence) > 3000 else db_evidence
     prompt = f"""
     You are the Senior Fraud Overseer.
     A Lead Investigator has submitted a Final Verdict for a case.
@@ -254,7 +304,7 @@ async def async_agent3_critic(verdict, db_evidence, rules):
     {rules}
     
     EVIDENCE GATHERED:
-    {db_evidence}
+    {capped_evidence}
     
     SUBMITTED VERDICT:
     {verdict}
@@ -267,15 +317,15 @@ async def async_agent3_critic(verdict, db_evidence, rules):
     If the verdict is flawed, hallucinated, or incomplete, output exactly:
     REJECTED: [Detailed feedback on what the investigator needs to do instead]
     """
-    completion = await async_groq_client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[{"role": "system", "content": prompt}],
-        temperature=0.0
-    )
-    return completion.choices[0].message.content
+    try:
+        completion = await async_groq_completion_with_fallback([{"role": "system", "content": prompt}])
+        return completion.choices[0].message.content
+    except Exception as e:
+        print(f"  [Critic] All Groq models failed: {e}. Defaulting to APPROVED.")
+        return "APPROVED"
 
 async def async_format_final_verdict(verdict_text, case_id, is_inconclusive=False):
-    """Uses AsyncGroq to extract structured JSON from the unstructured verdict."""
+    """Uses AsyncGroq with multi-model fallback to extract structured JSON from the unstructured verdict."""
     if is_inconclusive:
         json_obj = {
             "decision": "Inconclusive / System Error",
@@ -302,11 +352,10 @@ async def async_format_final_verdict(verdict_text, case_id, is_inconclusive=Fals
     {verdict_text}
     """
     try:
-        completion = await async_groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+        completion = await async_groq_completion_with_fallback(
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.0
+            candidate_models=["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
         )
         json_output = completion.choices[0].message.content
         os.makedirs("cases", exist_ok=True)
@@ -368,8 +417,7 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
     ]
     
     try:
-        response = await async_groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+        response = await async_groq_completion_with_fallback(
             messages=messages,
             tools=groq_tools,
             temperature=0.0
@@ -428,8 +476,7 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
         ]
         
         try:
-            final_resp = await async_groq_client.chat.completions.create(
-                model="openai/gpt-oss-120b",
+            final_resp = await async_groq_completion_with_fallback(
                 messages=summary_messages,
                 temperature=0.0
             )
@@ -515,8 +562,7 @@ async def async_agent_failure_analyst(case_trigger, db_evidence, last_critic_rev
     Do NOT declare "Confirmed Fraud" or "False Positive". Focus strictly on diagnosing the investigation failure.
     """
     try:
-        completion = await async_groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+        completion = await async_groq_completion_with_fallback(
             messages=[{"role": "system", "content": prompt}],
             temperature=0.0
         )

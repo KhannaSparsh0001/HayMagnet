@@ -23,7 +23,7 @@ if not gemini_api_key:
     sys.exit(1)
 ai = genai.Client(api_key=gemini_api_key)
 
-# Setup Groq (Primary Planner & Formatter)
+# Setup Groq (Primary Planner, Critic & Formatter)
 groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key) if groq_api_key and groq_api_key != "your_groq_api_key_here" else None
 
@@ -51,7 +51,6 @@ def triage_case(row):
         try:
             score = float(row.get('risk_score', 0))
             if score < 0.5:
-                print(f"Skipping {row.get('case_id')}: Risk score ({score}) below threshold.")
                 return False
         except (ValueError, TypeError):
             pass
@@ -94,10 +93,10 @@ def format_final_verdict(verdict_text, case_id):
         return None
 
 # ==============================================================================
-# PHASE 3: CORE ENGINE (AGENTS 1 & 2)
+# PHASE 3 & 4: CORE ENGINE (AGENTS 1, 2, AND 3)
 # ==============================================================================
 
-def agent2_planner(case_trigger, rules, db_evidence):
+def agent2_planner(case_trigger, rules, db_evidence, feedback=""):
     """Groq Llama 3.1 70B acts as the Lead Investigator."""
     if not groq_client:
         return "Final Verdict: Error - GROQ_API_KEY is not configured."
@@ -115,12 +114,47 @@ def agent2_planner(case_trigger, rules, db_evidence):
     DATABASE EVIDENCE GATHERED SO FAR:
     {db_evidence if db_evidence else "None"}
     
+    {f'OVERSEER FEEDBACK (CRITICAL): {feedback}' if feedback else ''}
+    
     INSTRUCTIONS:
     If you need more information from the TigerGraph database, output exactly:
     Data Request: [Your plain english request for the DB expert, e.g., 'Find all transactions for card X']
     
     If you have enough information to make a decision based on the rules, output exactly:
     Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
+    """
+    completion = groq_client.chat.completions.create(
+        model="llama-3.1-70b-versatile",
+        messages=[{"role": "system", "content": prompt}],
+        temperature=0.0
+    )
+    return completion.choices[0].message.content
+
+def agent3_critic(verdict, db_evidence, rules):
+    """Groq Llama 3.1 70B acts as the Senior Critic/Overseer."""
+    if not groq_client:
+        return "APPROVED" # Skip if no API key
+        
+    prompt = f"""
+    You are the Senior Fraud Overseer.
+    A Lead Investigator has submitted a Final Verdict for a case.
+    
+    RULES:
+    {rules}
+    
+    EVIDENCE GATHERED:
+    {db_evidence}
+    
+    SUBMITTED VERDICT:
+    {verdict}
+    
+    INSTRUCTIONS:
+    Critically analyze the verdict. Did the investigator hallucinate evidence? Did they misapply a rule?
+    If the verdict is sound and logically supported by the actual evidence gathered, output exactly:
+    APPROVED
+    
+    If the verdict is flawed, hallucinated, or incomplete, output exactly:
+    REJECTED: [Detailed feedback on what the investigator needs to do instead]
     """
     completion = groq_client.chat.completions.create(
         model="llama-3.1-70b-versatile",
@@ -140,7 +174,6 @@ async def agent1_hf_fallback(mcp_client, data_request, tools, system_instruction
         {"role": "user", "content": data_request}
     ]
     
-    # Notice we don't pass tool_choice="auto" right away to ensure strict compat
     response = hf_client.chat.completions.create(
         model="meta-llama/Meta-Llama-3-70B-Instruct",
         messages=messages,
@@ -217,25 +250,33 @@ async def agent1_db_expert(mcp_client, data_request, tools):
             raise e
 
 async def investigate_case(mcp_client, case_trigger, tools, rules):
-    print(f"\n==============================================")
-    print(f"INVESTIGATING CASE: {case_trigger}")
-    print(f"==============================================\n")
-    
     db_evidence = ""
-    max_turns = 5
+    critic_feedback = ""
+    max_turns = 8
     
     for turn in range(max_turns):
         print(f"\n--- Turn {turn+1} ---")
         
         print("> Agent 2 (Groq) is analyzing...")
-        action = agent2_planner(case_trigger, rules, db_evidence)
+        action = agent2_planner(case_trigger, rules, db_evidence, feedback=critic_feedback)
+        critic_feedback = "" # Reset feedback after use
         
         if "Final Verdict:" in action or turn == max_turns - 1:
-            print(f"> Agent 2 concluded the investigation:\n{action}")
-            return action
+            print(f"> Agent 2 submitted a verdict.")
+            
+            # Phase 4: Agent 3 Critic Review
+            print("> Agent 3 (Critic) is reviewing the verdict...")
+            review = agent3_critic(action, db_evidence, rules)
+            
+            if "APPROVED" in review or turn == max_turns - 1:
+                print("> Agent 3 APPROVED the verdict.")
+                return action
+            else:
+                print(f"> Agent 3 REJECTED the verdict: {review}")
+                critic_feedback = review
+                continue # Loop back to Agent 2
             
         print(f"> Agent 2 requested data: {action.replace('Data Request:', '').strip()}")
-        
         print("> Agent 1 (Gemini/HF) is executing graph queries...")
         new_evidence = await agent1_db_expert(mcp_client, action, tools)
         
@@ -256,14 +297,29 @@ async def main():
     print(f"Connected! Loaded {len(tools)} graph tools.")
     
     df = pd.read_csv("HHGOA_IEEE/case_pack.csv")
-    first_row = df.iloc[0]
     
-    if triage_case(first_row):
-        unstructured_verdict = await investigate_case(mcp_client, first_row['trigger_text'], tools, rules)
-        format_final_verdict(unstructured_verdict, first_row['case_id'])
-    else:
-        print(f"Case {first_row['case_id']} triaged as low risk.")
+    print(f"\nStarting Batch Processing for {len(df)} cases...\n")
+    
+    for index, row in df.iterrows():
+        case_id = row['case_id']
+        case_trigger = row['trigger_text']
         
+        print(f"\n=======================================================")
+        print(f"PROCESSING CASE {case_id} ({index+1}/{len(df)})")
+        print(f"=======================================================\n")
+        
+        if triage_case(row):
+            try:
+                unstructured_verdict = await investigate_case(mcp_client, case_trigger, tools, rules)
+                format_final_verdict(unstructured_verdict, case_id)
+            except Exception as e:
+                print(f"❌ Unhandled error processing {case_id}: {e}")
+                print("Sleeping for 10s before continuing to next case to clear API limits...")
+                time.sleep(10)
+        else:
+            print(f"Case {case_id} triaged as low risk. Skipping investigation.")
+            
+    print("\n✅ BATCH PROCESSING COMPLETE!")
     await mcp_client.close()
 
 if __name__ == "__main__":

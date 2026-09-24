@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import json
 import os
+import time
 
 BACKEND_URL = "http://127.0.0.1:8000"
 
@@ -12,6 +13,24 @@ st.set_page_config(
     page_icon="🤖",
     layout="wide"
 )
+
+# Wait for server health on boot
+def wait_for_backend(max_retries=5):
+    placeholder = st.sidebar.empty()
+    for i in range(max_retries):
+        try:
+            res = requests.get(f"{BACKEND_URL}/", timeout=1)
+            if res.status_code == 200:
+                placeholder.empty()
+                return True, res.json()
+        except Exception:
+            placeholder.info(f"⏳ Waiting for backend to start... (Attempt {i+1}/{max_retries})")
+            time.sleep(1)
+    
+    placeholder.empty()
+    return False, {}
+
+server_online, server_info = wait_for_backend()
 
 # Fetch cases from Backend API (with fallback to local CSV)
 @st.cache_data(ttl=5)
@@ -29,16 +48,6 @@ def get_cases():
     return None
 
 df = get_cases()
-
-# Check server health
-def check_server():
-    try:
-        res = requests.get(f"{BACKEND_URL}/", timeout=2)
-        return res.status_code == 200, res.json() if res.status_code == 200 else {}
-    except Exception:
-        return False, {}
-
-server_online, server_info = check_server()
 
 # Sidebar
 with st.sidebar:

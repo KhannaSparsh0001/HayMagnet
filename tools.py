@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 from contextlib import AsyncExitStack
 import asyncio
 from mcp import ClientSession, StdioServerParameters
@@ -56,7 +57,9 @@ class TigerGraphMCPClient:
         """Starts the local MCP server as a subprocess and establishes a session."""
         self._exit_stack = AsyncExitStack()
         
-        mcp_executable = os.path.join(sys.prefix, "Scripts", "tigergraph-mcp.exe") if sys.platform == "win32" else "tigergraph-mcp"
+        mcp_executable = shutil.which("tigergraph-mcp") or (
+            os.path.join(sys.prefix, "Scripts", "tigergraph-mcp.exe") if sys.platform == "win32" else "tigergraph-mcp"
+        )
         
         server_params = StdioServerParameters(
             command=mcp_executable,
@@ -83,6 +86,8 @@ class TigerGraphMCPClient:
             "tigergraph__get_node", 
             "tigergraph__get_node_edges", 
             "tigergraph__get_graph_schema",
+            "tigergraph__show_graph_details",
+            "tigergraph__get_neighbors",
             "tigergraph__run_query"
         ]
         return [t for t in tools_response.tools if t.name in allowed_tools]

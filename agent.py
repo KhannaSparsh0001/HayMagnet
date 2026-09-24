@@ -4,6 +4,7 @@ import sys
 import asyncio
 import pandas as pd
 import json
+import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -323,6 +324,44 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
         return "Error: Groq Fallback triggered but GROQ_API_KEY is not configured."
         
     groq_tools = [convert_mcp_to_openai_schema(t) for t in tools]
+    
+    # Register common hallucinated aliases (both prefixed and unprefixed) so Groq API never rejects with tool_use_failed
+    existing_tool_names = {t["function"]["name"] for t in groq_tools}
+    
+    compatibility_definitions = [
+        ("tigergraph__run_gremlin_query", "Compatibility tool for graph traversal queries."),
+        ("run_gremlin_query", "Compatibility tool for graph traversal queries."),
+        ("tigergraph__show_graph_details", "Show details of the graph schema."),
+        ("show_graph_details", "Show details of the graph schema."),
+        ("get_node_edges", "Get edges connected to a vertex."),
+        ("get_node", "Get vertex details."),
+        ("get_neighbors", "Get neighbors of a vertex."),
+        ("get_graph_schema", "Get graph schema."),
+        ("run_query", "Run a TigerGraph query."),
+        ("gsql", "Execute GSQL statement.")
+    ]
+    
+    for tool_name, desc in compatibility_definitions:
+        if tool_name not in existing_tool_names:
+            groq_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": desc,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "graph_name": {"type": "string"},
+                            "vertex_type": {"type": "string"},
+                            "vertex_id": {"type": "string"},
+                            "edge_type": {"type": "string"},
+                            "query": {"type": "string"},
+                            "command": {"type": "string"}
+                        }
+                    }
+                }
+            })
+
     messages = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": data_request}
@@ -342,14 +381,40 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
             
         tool_results = []
         for tool_call in msg.tool_calls:
+            t_name = tool_call.function.name
             args_dict = json.loads(tool_call.function.arguments) if isinstance(tool_call.function.arguments, str) else tool_call.function.arguments
-            if ui_callback:
-                ui_callback(tool_call.function.name, args_dict)
-            else:
-                print(f"  [Groq Fallback] Running {tool_call.function.name}...")
+            if not isinstance(args_dict, dict):
+                args_dict = {}
+            
+            # Map aliases and normalize tool names
+            if "gremlin" in t_name.lower():
+                query_str = args_dict.get("query", "")
+                card_match = re.search(r"\b(C-[\w\-]+)\b", query_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
+                if card_match:
+                    card_id = card_match.group(1)
+                    t_name = "tigergraph__get_node_edges"
+                    args_dict = {
+                        "graph_name": "FraudGraph",
+                        "vertex_type": "Card",
+                        "vertex_id": card_id,
+                        "edge_type": "MADE"
+                    }
+                else:
+                    t_name = "tigergraph__get_graph_schema"
+                    args_dict = {"graph_name": "FraudGraph"}
+            elif "details" in t_name.lower() or t_name in ["show_graph_details", "tigergraph__show_graph_details"]:
+                t_name = "tigergraph__get_graph_schema"
+                args_dict = {"graph_name": "FraudGraph"}
+            elif not t_name.startswith("tigergraph__"):
+                t_name = f"tigergraph__{t_name}"
                 
-            tool_output = await mcp_client.execute_tool(tool_call.function.name, args_dict)
-            tool_results.append(f"Tool `{tool_call.function.name}`: {tool_output}")
+            if ui_callback:
+                ui_callback(t_name, args_dict)
+            else:
+                print(f"  [Groq Fallback] Running {t_name} with {args_dict}...")
+                
+            tool_output = await mcp_client.execute_tool(t_name, args_dict)
+            tool_results.append(f"Tool `{t_name}`: {tool_output}")
             
         summary_messages = [
             {
@@ -373,7 +438,56 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
             print(f"  [Groq Fallback summary error: {sum_err}], returning raw evidence.")
             return "\n".join(tool_results)
     except Exception as e:
-        return f"Groq Fallback tool execution error: {e}"
+        error_str = str(e)
+        print(f"  [Groq Fallback Exception Caught]: {error_str[:200]}")
+        
+        # 1. Attempt recovery from failed_generation if Groq refused an unlisted function
+        failed_gen_match = re.search(r"['\"]failed_generation['\"]\s*:\s*['\"](\{.*?\})['\"]\s*\}", error_str, re.DOTALL)
+        if failed_gen_match:
+            try:
+                gen_raw = failed_gen_match.group(1).replace("\\'", "'").replace('\\"', '"')
+                parsed_gen = json.loads(gen_raw)
+                p_name = parsed_gen.get("name", "")
+                p_args = parsed_gen.get("arguments", {})
+                if "gremlin" in p_name:
+                    query_str = str(p_args)
+                    c_match = re.search(r"\b(C-[\w\-]+)\b", query_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
+                    if c_match:
+                        edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {
+                            "graph_name": "FraudGraph",
+                            "vertex_type": "Card",
+                            "vertex_id": c_match.group(1),
+                            "edge_type": "MADE"
+                        })
+                        return f"Retrieved transactions for card {c_match.group(1)}: {edges}"
+                elif "schema" in p_name or "details" in p_name:
+                    schema_res = await mcp_client.execute_tool("tigergraph__get_graph_schema", {"graph_name": "FraudGraph"})
+                    return f"Retrieved FraudGraph schema: {schema_res}"
+            except Exception as gen_err:
+                print(f"  [Groq Fallback Failed Gen Recovery Error]: {gen_err}")
+                
+        # 2. Direct recovery by searching for card ID in error or original request
+        card_match = re.search(r"\b(C-[\w\-]+)\b", error_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
+        if card_match:
+            card_id = card_match.group(1)
+            print(f"  [Groq Fallback Direct Recovery] Extracting edges for card {card_id}...")
+            try:
+                edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {
+                    "graph_name": "FraudGraph",
+                    "vertex_type": "Card",
+                    "vertex_id": card_id,
+                    "edge_type": "MADE"
+                })
+                return f"Retrieved transactions for card {card_id}: {edges}"
+            except Exception as rec_err:
+                print(f"  [Groq Fallback Recovery Edge Error]: {rec_err}")
+                
+        # 3. Last-resort fallback: fetch schema directly so the pipeline never halts with 400
+        try:
+            schema_res = await mcp_client.execute_tool("tigergraph__get_graph_schema", {"graph_name": "FraudGraph"})
+            return f"FraudGraph Schema Evidence (retrieved via direct fallback): {schema_res}"
+        except Exception:
+            return f"Database query could not be completed for request: {data_request}"
 
 async def async_agent_failure_analyst(case_trigger, db_evidence, last_critic_review=""):
     """Analyzes an inconclusive investigation execution trace and provides a clear human diagnostic summary."""
@@ -411,11 +525,23 @@ async def async_agent_failure_analyst(case_trigger, db_evidence, last_critic_rev
         return f"Investigation incomplete: Encountered system errors during database retrieval and analysis trace ({e})."
 
 async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None):
-    """Gemini 2.5 Flash acts as the DB Expert with TigerGraph MCP Tools."""
+    """Gemini 3.6 Flash acts as the DB Expert with TigerGraph MCP Tools."""
     system_instruction = f"""
-    You are an expert Graph Database Query Agent. You have access to TigerGraph MCP tools.
-    Your goal is to answer the Lead Investigator's data request by calling the appropriate tools.
-    Always use `FraudGraph` when a graph name is required.
+    You are an expert Graph Database Query Agent for TigerGraph.
+    You have direct access to TigerGraph MCP tools for the graph `FraudGraph`.
+    
+    AVAILABLE TOOLS:
+    1. `tigergraph__get_node_edges`: To find transactions made by a card, call with:
+       vertex_type='Card', vertex_id='<card_id>', edge_type='MADE', graph_name='FraudGraph'.
+       To find devices used by a transaction, call with vertex_type='Transaction', vertex_id='<tx_id>', edge_type='FROM_DEVICE'.
+       To find who owns a card, call with vertex_type='Customer', vertex_id='<customer_id>', edge_type='OWNS'.
+    2. `tigergraph__get_node`: To inspect vertex details for any Card, Transaction, Customer, or DeviceProfile.
+    3. `tigergraph__run_query`: To run an interpreted GSQL query: `INTERPRET QUERY () FOR GRAPH FraudGraph {{ ... }}`.
+    4. `tigergraph__get_graph_schema`: To view the graph structure (graph_name='FraudGraph').
+    
+    IMPORTANT:
+    - Never invent tools. TigerGraph uses GSQL, not Gremlin.
+    - Always use graph_name='FraudGraph'.
     """
     
     gemini_tools = [convert_mcp_tool_to_gemini(t) for t in tools]

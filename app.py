@@ -343,7 +343,15 @@ with tab_single:
                                 summary = case_data.get("summary", "")
                                 
                                 actions = parsed.get("next_best_actions", {})
-                                route = actions.get("final", {}).get("action", "L1_MANUAL_REVIEW")
+                                final_act = actions.get("final", {})
+                                if isinstance(final_act, list):
+                                    route = final_act[0].get("action", "L1_MANUAL_REVIEW") if final_act and isinstance(final_act[0], dict) else "L1_MANUAL_REVIEW"
+                                elif isinstance(final_act, dict):
+                                    route = final_act.get("action", "L1_MANUAL_REVIEW")
+                                elif isinstance(final_act, str):
+                                    route = final_act
+                                else:
+                                    route = "L1_MANUAL_REVIEW"
 
                                 col_v1, col_v2, col_v3 = st.columns(3)
                                 with col_v1:

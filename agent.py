@@ -712,10 +712,36 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
         )
         
         msg = response.choices[0].message
+        tool_results = []
+
         if not msg.tool_calls:
+            # Fallback direct lookup if model returned no tool calls
+            txn_match = re.search(r"\b(\d{7})\b", data_request)
+            card_match = re.search(r"\b(C-[\w\-]+)\b", data_request)
+            if txn_match:
+                txn_id = txn_match.group(1)
+                try:
+                    node_info = await mcp_client.execute_tool("tigergraph__get_node", {"graph_name": "FraudGraph", "vertex_type": "Transaction", "vertex_id": txn_id})
+                    tool_results.append(f"Transaction Node {txn_id}: {node_info}")
+                    for et in ["FROM_DEVICE", "PURCHASER_EMAIL", "BILLED_IN"]:
+                        try:
+                            edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {"graph_name": "FraudGraph", "vertex_type": "Transaction", "vertex_id": txn_id, "edge_type": et})
+                            tool_results.append(f"Edges ({et}): {edges}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if card_match:
+                card_id = card_match.group(1)
+                try:
+                    edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {"graph_name": "FraudGraph", "vertex_type": "Card", "vertex_id": card_id, "edge_type": "MADE"})
+                    tool_results.append(f"Card Edges (MADE): {edges}")
+                except Exception:
+                    pass
+            if tool_results:
+                return f"Retrieved Graph Evidence:\n" + "\n".join(tool_results)
             return msg.content or "No relevant evidence returned by Groq fallback model."
             
-        tool_results = []
         for tool_call in msg.tool_calls:
             t_name = tool_call.function.name
             args_dict = json.loads(tool_call.function.arguments) if isinstance(tool_call.function.arguments, str) else tool_call.function.arguments
@@ -738,13 +764,19 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
                     }
                 elif txn_match:
                     txn_id = txn_match.group(1)
-                    t_name = "tigergraph__get_node_edges"
-                    args_dict = {
-                        "graph_name": "FraudGraph",
-                        "vertex_type": "Transaction",
-                        "vertex_id": txn_id,
-                        "edge_type": "FROM_DEVICE"
-                    }
+                    # Query node details first and multiple edge types
+                    try:
+                        node_info = await mcp_client.execute_tool("tigergraph__get_node", {"graph_name": "FraudGraph", "vertex_type": "Transaction", "vertex_id": txn_id})
+                        tool_results.append(f"Transaction Node {txn_id}: {node_info}")
+                    except Exception:
+                        pass
+                    for et in ["FROM_DEVICE", "PURCHASER_EMAIL", "BILLED_IN"]:
+                        try:
+                            edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {"graph_name": "FraudGraph", "vertex_type": "Transaction", "vertex_id": txn_id, "edge_type": et})
+                            tool_results.append(f"Edges ({et}): {edges}")
+                        except Exception:
+                            pass
+                    continue
                 else:
                     if CACHED_GRAPH_SCHEMA_STRATEGY:
                         tool_results.append(f"Tool `tigergraph__get_graph_schema`: {CACHED_GRAPH_SCHEMA_STRATEGY}")
@@ -796,17 +828,26 @@ async def agent1_groq_fallback(mcp_client, data_request, tools, system_instructi
         txn_match = re.search(r"\b(\d{7})\b", error_str) or re.search(r"\b(\d{7})\b", data_request)
         if txn_match:
             txn_id = txn_match.group(1)
-            print(f"  [Groq Fallback Recovery] Extracting edges for transaction {txn_id}...")
+            print(f"  [Groq Fallback Recovery] Extracting node and edges for transaction {txn_id}...")
+            recovered = []
             try:
-                edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {
-                    "graph_name": "FraudGraph",
-                    "vertex_type": "Transaction",
-                    "vertex_id": txn_id,
-                    "edge_type": "FROM_DEVICE"
-                })
-                return f"Retrieved device/connection records for transaction {txn_id}: {edges}"
-            except Exception as rec_err:
-                print(f"  [Groq Fallback Recovery Txn Edge Error]: {rec_err}")
+                n_info = await mcp_client.execute_tool("tigergraph__get_node", {"graph_name": "FraudGraph", "vertex_type": "Transaction", "vertex_id": txn_id})
+                recovered.append(f"Transaction Node Attributes: {n_info}")
+            except Exception:
+                pass
+            for et in ["FROM_DEVICE", "PURCHASER_EMAIL", "BILLED_IN"]:
+                try:
+                    edges = await mcp_client.execute_tool("tigergraph__get_node_edges", {
+                        "graph_name": "FraudGraph",
+                        "vertex_type": "Transaction",
+                        "vertex_id": txn_id,
+                        "edge_type": et
+                    })
+                    recovered.append(f"Edges ({et}): {edges}")
+                except Exception:
+                    pass
+            if recovered:
+                return f"Retrieved records for transaction {txn_id}:\n" + "\n".join(recovered)
 
         # 2. Direct recovery by searching for card ID
         card_match = re.search(r"\b(C-[\w\-]+)\b", error_str) or re.search(r"\b(C-[\w\-]+)\b", data_request)
@@ -888,17 +929,17 @@ async def agent1_db_expert(mcp_client, data_request, tools, ui_callback=None, ap
     {CACHED_GRAPH_SCHEMA_STRATEGY if CACHED_GRAPH_SCHEMA_STRATEGY else ''}
     
     AVAILABLE TOOLS:
-    1. `tigergraph__get_node_edges`: To find transactions made by a card, call with:
-       vertex_type='Card', vertex_id='<card_id>', edge_type='MADE', graph_name='FraudGraph'.
-       To find devices used by a transaction, call with vertex_type='Transaction', vertex_id='<tx_id>', edge_type='FROM_DEVICE'.
-       To find who owns a card, call with vertex_type='Customer', vertex_id='<customer_id>', edge_type='OWNS'.
-    2. `tigergraph__get_node`: To inspect vertex details for any Card, Transaction, Customer, or DeviceProfile.
-    3. `tigergraph__run_query`: To run an interpreted GSQL query: `INTERPRET QUERY () FOR GRAPH FraudGraph {{ ... }}`.
-    4. `tigergraph__get_graph_schema`: To view the graph structure (graph_name='FraudGraph').
+    1. `tigergraph__get_node_edges`: 
+       - Card edges: vertex_type='Card', vertex_id='<card_id>', edge_type='MADE'
+       - Transaction edges: vertex_type='Transaction', vertex_id='<tx_id>', edge_type can be 'FROM_DEVICE', 'PURCHASER_EMAIL', or 'BILLED_IN'. Make multiple tool calls if multiple edge types are requested!
+       - ClosedCase edges: vertex_type='ClosedCase', vertex_id='<case_id>', edge_type='INVOLVES', 'ON_CARD', or 'CONNECTED_TO'
+    2. `tigergraph__get_node`: To inspect vertex attributes (risk_score, ts, amount, channel for Transaction; outcome, pattern, exposure_usd for ClosedCase).
+    3. `tigergraph__get_neighbors`: To retrieve 1-hop or 2-hop neighbor vertices.
+    4. `tigergraph__run_query`: To run an interpreted GSQL query: `INTERPRET QUERY () FOR GRAPH FraudGraph {{ ... }}`.
     
     IMPORTANT:
-    - Never invent tools. TigerGraph uses GSQL, not Gremlin.
-    - Always use graph_name='FraudGraph'.
+    - If the request asks for vertex attributes (risk_score, amount, etc.) AND connected edges, issue calls for `tigergraph__get_node` AND `tigergraph__get_node_edges` for each edge type requested!
+    - Never invent tools. Always use graph_name='FraudGraph'.
     """
     
     gemini_tools = [convert_mcp_tool_to_gemini(t) for t in tools]

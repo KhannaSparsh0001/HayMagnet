@@ -1,4 +1,60 @@
 {
-  "decision": "Inconclusive / System Error",
-  "reasoning": "The data request returned only the graph schema and no actual transaction, card, device, or ClosedCase records, so the system could not retrieve the details for transaction\u202f3478782, its recent history, or any linked fraud alerts. Without those concrete data points the risk model cannot be validated or a fraud decision made. A manual query against the\u202fFraudGraph\u202fdatabase (or a corrected API call) is needed to pull the transaction vertex and its related card, device, IP/merchant, and case vertices, after which the investigation can be completed."
+  "case_id": "HHG-002",
+  "case": {
+    "status": "escalated",
+    "verdict": "uncertain",
+    "fraud_probability": 0.5,
+    "pattern": "none",
+    "pattern_description": "",
+    "affected_txn_ids": [],
+    "first_suspicious_txn_id": "",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 0.0,
+    "evidence": [],
+    "similar_prior_cases": [],
+    "summary": "The automated query returned only a single edge‑scan result indicating that transaction 3478782 has **no outgoing `FROM_DEVICE` edges**; no vertex attributes or other edge types were retrieved, and no related `ClosedCase` vertices were found. Because the core data (risk_score, amount, channel, card,",
+    "written_to_graph": false,
+    "graph_case_id": ""
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [
+      {
+        "action": "MONITOR_CARD",
+        "route": "auto",
+        "reason": "R4: Elevated monitoring on uncertain signal with low exposure."
+      },
+      {
+        "action": "VERIFY_WITH_CUSTOMER",
+        "route": "auto",
+        "reason": "R1: Weak signal with probability < 0.70; verify before blocking."
+      }
+    ],
+    "final": [
+      {
+        "action": "MONITOR_CARD",
+        "route": "auto",
+        "reason": "R4: Elevated monitoring on uncertain signal with low exposure."
+      },
+      {
+        "action": "VERIFY_WITH_CUSTOMER",
+        "route": "auto",
+        "reason": "R1: Weak signal with probability < 0.70; verify before blocking."
+      }
+    ],
+    "what_changed": "nothing"
+  },
+  "sar": {
+    "file": false,
+    "reason": "Uncertain verdict; no SAR required.",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0.0,
+    "activity_dates": []
+  },
+  "stop_reason": "Investigation inconclusive due to system error or timeout.",
+  "tool_calls": 0,
+  "tokens": 0,
+  "latency_s": 0.0
 }

@@ -36,13 +36,28 @@ Financial fraud investigation is notoriously complex: investigators must query d
 
 ---
 
-## 🏗️ System Architecture
+## ✨ Key Features List
+
+- 🐯 **TigerGraph Model Context Protocol (MCP) Native Integration:** Direct real-time graph traversal, vertex inspection, and interpreted GSQL query execution over `FraudGraph`.
+- 🤖 **Dynamic Multi-Agent AI Swarm:** Specialized Agent 1 (DB Expert), Agent 2 (Lead Analyst with Case Memory), Agent 3 (Senior Overseer Critic), and Failure Forensic Analyst.
+- 🛡️ **100% Deterministic Policy Engine (R1–R10 Rules):** Python-native calculation of transaction exposure, institutional fraud rules, and 3-tier approval matrix (`AUTO_APPROVE`, `L1_MANUAL_REVIEW`, `L2_SAR_ESCALATION`).
+- ⚡ **Simulated Operational Action Execution Engine:** Mock APIs for customer SMS validation, account freezing, card blocking, chargeback refunds, CRM ticketing, and case closure.
+- 🧠 **Persistent Graph Case Memory:** Deterministic write-back of closed case outcomes (`write_case_to_graph`) to TigerGraph for historical pattern matching and retrieval.
+- 🔌 **Universal Multi-Provider Engine & Live Connection Testing:** Dynamic support for Gemini, Groq, HuggingFace, and custom write-in models with live `/api/test-model` 1-token connection verification.
+- 📺 **Non-Blocking SSE Real-Time Telemetry Stream:** Line-by-line streaming of agent reasoning chunks, collapsible MCP tool execution logs, and Overseer critique cards.
+- 📊 **Autonomous 20-Case Benchmark Suite & Auditor:** Single-click execution across all 20 benchmark cases with live progress tracking, status tables, and downloadable `investigation_results.csv` export.
+- 🎨 **Enterprise Light Mode Command Center:** Sleek, high-contrast UI custom styled for presentation and hackathon evaluation.
+- 🚀 **Unified Single-Command Launcher (`python run.py`):** One-click execution booting FastAPI backend and Streamlit frontend in separate terminal tabs.
+
+---
+
+## 🏗️ Detailed Architecture Diagram
 
 ```mermaid
 graph TD
-    User["👤 Fraud Analyst / Judge"] -->|Interacts via UI| App["💻 Streamlit Command Center (app.py)"]
+    User["👤 Fraud Analyst / Judge"] -->|Interacts via Streamlit UI| App["💻 Streamlit Command Center (app.py)"]
     
-    subgraph Streamlit_UI ["Streamlit Frontend"]
+    subgraph Streamlit_UI ["Streamlit Frontend Layer"]
         Sidebar["⚙️ Sidebar Config\n(API Keys & Dynamic Provider Selector)"]
         StreamReader["📺 Live SSE Stream Reader\n(Non-blocking Telemetry)"]
         Inspector["🛡️ Rule Inspector & Verdict Card\n(R1-R10 Badges & Approval Route)"]
@@ -53,7 +68,7 @@ graph TD
     
     subgraph Backend_Engine ["FastAPI Backend Engine"]
         Endpoint["/api/investigate/{case_id}"]
-        TestEndpoint["/api/test-model (1-Token Verification)"]
+        TestEndpoint["/api/test-model\n(1-Token Model Verification)"]
         Orchestrator["Agent Orchestration Loop (agent.py)"]
     end
 
@@ -61,6 +76,7 @@ graph TD
         Agent1["🤖 Agent 1: DB Expert\n(Gemini 2.5 / Groq + MCP Tools)"]
         Agent2["🕵️ Agent 2: Lead Analyst\n(Groq GPT-OSS 120B / Gemini)"]
         Agent3["⚖️ Agent 3: Senior Overseer\n(Critic & Quality Gate)"]
+        FailAnalyst["📊 Failure Forensic Analyst\n(Inconclusive Case Diagnostics)"]
     end
 
     subgraph Deterministic_Layer ["Deterministic Core Engine"]
@@ -72,6 +88,7 @@ graph TD
     Orchestrator --> Agent1
     Orchestrator --> Agent2
     Orchestrator --> Agent3
+    Orchestrator --> FailAnalyst
     Agent1 -->|MCP Tool Calls| TG["🐯 TigerGraph Database (FraudGraph)"]
     Orchestrator --> PolicyEng
     PolicyEng --> ActionExec
@@ -82,12 +99,12 @@ graph TD
 
 ## 🤖 The Multi-Agent Swarm Breakdown
 
-HayMagnet divides investigation responsibilities across three specialized agent roles:
+HayMagnet divides investigation responsibilities across specialized agent roles:
 
-| Agent Role | Model Provider | Responsibilities |
+| Agent Role | Primary Provider | Responsibilities |
 | :--- | :--- | :--- |
 | **🤖 Agent 1: DB Expert** | Gemini 2.5 Flash / Groq / HuggingFace | Translates investigator data requests into GSQL & MCP tools (`tigergraph__get_node_edges`, `tigergraph__get_node`, `tigergraph__run_query`). Fetches graph evidence. |
-| **🕵️ Agent 2: Lead Analyst** | Groq `openai/gpt-oss-120b` / Gemini | Analyzes incoming triggers, requests graph evidence, queries past **Graph Case Memory**, identifies fraud patterns, and Formulates verdicts. |
+| **🕵️ Agent 2: Lead Analyst** | Groq `openai/gpt-oss-120b` / Gemini | Analyzes incoming triggers, requests graph evidence, queries past **Graph Case Memory**, identifies fraud patterns, and formulates verdicts. |
 | **⚖️ Agent 3: Senior Overseer** | Groq `openai/gpt-oss-120b` / Gemini | Acts as a strict quality gate. Reviews Agent 2's reasoning against gathered evidence to reject hallucinated or unevidenced conclusions. |
 | **📊 Failure Forensic Analyst** | Groq / Gemini | If an investigation loop is inconclusive after maximum turns, analyzes the execution trace and generates a human-readable diagnostic report. |
 
@@ -115,7 +132,7 @@ All financial calculations and regulatory rules are handled deterministically in
 
 Downstream operational actions recommended by the policy engine are executed through simulated mock APIs:
 
-- 📩 `mock_send_customer_message(customer_id, text)`: Simulates customer SMS/Email validation & warning alerts.
+- 📩 `mock_send_customer_message(customer_id, text)`: Simulates customer SMS/Email validation & warning alerts (`MSG-xxxx`).
 - 🔒 `mock_freeze_account(account_id, reason)`: Simulates core banking account freeze (`ACT-FREEZE-xxxx`).
 - 💳 `mock_block_card(card_id, reason)`: Simulates payment gateway card block (`ACT-BLOCK-xxxx`).
 - 💵 `mock_refund_customer(txn_id, amount)`: Simulates issuing fraud chargeback refunds (`REF-xxxx`).

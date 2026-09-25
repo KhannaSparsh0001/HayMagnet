@@ -15,6 +15,7 @@ from huggingface_hub import InferenceClient
 # Import our modularized tools
 from tools import TigerGraphMCPClient, convert_mcp_tool_to_gemini, convert_mcp_to_openai_schema, write_case_to_graph
 import policy_engine
+import action_executor
 import time
 
 
@@ -418,11 +419,11 @@ async def async_agent2_planner_stream(case_trigger, rules, db_evidence, feedback
     {f'OVERSEER FEEDBACK (CRITICAL): {feedback}' if feedback else ''}
     
     INSTRUCTIONS:
-    If you need more information from the TigerGraph database, output exactly:
-    Data Request: [Your plain english request for the DB expert, e.g., 'Find all transactions for card X']
+    1. If you need more information from the TigerGraph database (including checking past closed cases/case memory for similar entities or historical outcomes), output exactly:
+       Data Request: [Your plain english request for the DB expert, e.g., 'Check past closed cases and transactions for card X']
     
-    If you have enough information to make a decision based on the rules, output exactly:
-    Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
+    2. If you have enough information to make a decision based on the rules, output exactly:
+       Final Verdict: [Your detailed reasoning and decision (Confirmed Fraud or False Positive)]
     """
     messages = [{"role": "system", "content": prompt}]
     async for chunk in async_groq_stream_with_fallback(messages, custom_api_key=groq_key, primary_model=agent2_model):
@@ -566,6 +567,13 @@ async def async_format_final_verdict(verdict_text, case_id, is_inconclusive=Fals
             affected_txns_count=len(txns),
             connected_cards_count=len(connected_cards)
         )
+
+        # 3b. Execute Simulated / Stubbed Mock APIs (Customer Messaging, Account Freeze, Card Block, CRM Update)
+        simulated_action_logs = action_executor.execute_simulated_actions(
+            case_id=case_id,
+            actions=[a.model_dump() for a in fin_act]
+        )
+        print(f"  [Mock Action Executor] Executed {len(simulated_action_logs)} simulated API actions for case {case_id}: {[log.get('action') for log in simulated_action_logs]}")
 
         # 4. Deterministic Graph Case Memory Write
         written = False
